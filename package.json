@@ -1,0 +1,50 @@
+{
+  "name": "claudecode-ms-teams",
+  "version": "0.3.0",
+  "description": "Claude Code ↔ Microsoft Teams 양방향 채널 플러그인. 턴이 끝나면 응답을 Teams 채팅으로 보내고, 연동한 Teams 채팅방의 메시지를 세션에 주입하며, 권한 요청과 질문(AskUserQuestion)에 Teams 답장으로 응답한다.",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "claude-channel",
+    "mcp",
+    "microsoft-teams",
+    "msteams",
+    "microsoft-graph",
+    "chatops",
+    "remote-control",
+    "notification"
+  ],
+  "type": "module",
+  "bin": {
+    "claudecode-ms-teams": "dist/cli.js"
+  },
+  "files": [
+    ".claude-plugin",
+    "hooks",
+    "skills",
+    "dist",
+    "postinstall.mjs",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Jin Uk Yoon",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "@types/node": "^22.20.1",
+    "typescript": "^5.6.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\"",
+    "prepack": "npm run clean && npm run build",
+    "postinstall": "node postinstall.mjs",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  }
+}

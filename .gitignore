@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+tokens.json
+.omc/
+
+# npm
+.npmrc
+*.tgz
+.DS_Store
