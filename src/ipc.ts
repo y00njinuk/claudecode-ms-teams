@@ -9,6 +9,23 @@ import { dataDir, type Log } from "./core.js"
 
 export const TOKEN_HEADER = "x-claudecode-ms-teams-token"
 const MAX_BODY_BYTES = 1024 * 1024
+// Stop 요청은 Teams 발신이 끝날 때까지 응답을 잡아둔다. claude 는 Stop hook 이 끝나면 곧 종료하면서
+// MCP 서버에 SIGINT → SIGTERM → SIGKILL 을 0.5초 안에 보내므로 (2.1.330 `-p` 실측) 먼저 응답하면 마지막 응답이 사라진다.
+// hooks.json 의 Stop timeout 보다 짧아야 한다 (테스트로 강제).
+export const STOP_WAIT_MS = 8_000
+
+// 작업이 끝나거나 ms 가 지나면 resolve 한다. 시간이 지나도 작업은 취소하지 않고, 작업의 실패는 밖으로 던지지 않는다.
+export function holdAtMost(task: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    timer.unref?.()
+    const done = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    task.then(done, done)
+  })
+}
 
 export type RegistryEntry = {
   serverPid: number

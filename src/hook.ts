@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Claude Code command hook → 같은 세션의 MCP 서버로 전달하는 얇은 클라이언트.
-//   stop      : Stop 의 last_assistant_message 를 Teams 로 발신. StopFailure 도 이 이벤트로 받아 턴 종료만 알린다
+//   stop      : Stop 의 last_assistant_message 를 Teams 로 발신하고 발신이 끝날 때까지 기다린다.
+//               StopFailure 도 이 이벤트로 받아 턴 종료만 알린다
 //   permission: PermissionRequest (권한 요청 · AskUserQuestion · plan 승인) 를 Teams 로 알리고,
 //               Teams 답장이 올 때까지 기다렸다가 결정을 stdout 으로 돌려준다
 //   answered  : PostToolUse(AskUserQuestion) — 터미널에서 먼저 답한 질문의 대기 상태를 정리
@@ -9,11 +10,18 @@
 import * as fs from "node:fs"
 import * as http from "node:http"
 import { pathToFileURL } from "node:url"
-import { findSession, TOKEN_HEADER, type RegistryEntry } from "./ipc.js"
+import { findSession, STOP_WAIT_MS, TOKEN_HEADER, type RegistryEntry } from "./ipc.js"
 
 const IPC_TIMEOUT_MS = 3000
 const ASK_TOOL = "AskUserQuestion"
 const EVENTS = new Set(["stop", "permission", "answered", "subagent-stop"])
+
+// 0 = 응답이 올 때까지 기다린다. permission 은 Teams 답장까지, stop 은 서버가 발신을 기다리는 동안(STOP_WAIT_MS) 기다린다.
+export function ipcTimeoutMs(event: string): number {
+  if (event === "permission") return 0
+  if (event === "stop") return STOP_WAIT_MS + 1000
+  return IPC_TIMEOUT_MS
+}
 
 export function candidatePids(env: NodeJS.ProcessEnv, ppid: number): number[] {
   const fromEnv = Number(env.CLAUDE_PID)
@@ -112,7 +120,7 @@ async function main(): Promise<void> {
   }
   const payload = buildPayload(event, input)
   if (!payload) return
-  const res = await post(entry, event, payload, event === "permission" ? 0 : IPC_TIMEOUT_MS)
+  const res = await post(entry, event, payload, ipcTimeoutMs(event))
   if (event !== "permission" || res?.status !== 200) return
   const out = permissionOutput(res.body)
   if (out) await new Promise<void>((done) => process.stdout.write(JSON.stringify(out), () => done()))

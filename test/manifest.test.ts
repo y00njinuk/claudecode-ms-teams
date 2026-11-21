@@ -4,6 +4,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { MicrosoftTeamsChannel, REPLY_TTL_MS } from "../src/channel"
 import { defaultConfig, MARKETPLACE_NAME, NOOP_LOG, PLUGIN_NAME } from "../src/core"
+import { ipcTimeoutMs } from "../src/hook"
+import { STOP_WAIT_MS } from "../src/ipc"
 
 const ROOT = path.join(import.meta.dir, "..")
 const readJson = (p: string) => JSON.parse(fs.readFileSync(path.join(ROOT, p), "utf8"))
@@ -44,6 +46,13 @@ describe("manifest", () => {
 
   test("PermissionRequest hook 은 답장 코드가 유효한 동안 기다린다", () => {
     expect(hooks.hooks.PermissionRequest[0].hooks[0].timeout * 1000).toBe(REPLY_TTL_MS)
+  })
+
+  test("Stop hook 은 서버가 발신을 기다리는 시간보다 오래, hook timeout 보다 짧게 응답을 기다린다", () => {
+    expect(ipcTimeoutMs("stop")).toBeGreaterThan(STOP_WAIT_MS)
+    for (const event of ["Stop", "StopFailure"]) {
+      expect(ipcTimeoutMs("stop")).toBeLessThan(hooks.hooks[event][0].hooks[0].timeout * 1000)
+    }
   })
 
   test("npm tarball 에 플러그인 구성 요소가 포함된다", () => {

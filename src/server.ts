@@ -4,7 +4,15 @@
 import * as fs from "node:fs"
 import { MicrosoftTeamsChannel, CHANNEL_INSTRUCTIONS } from "./channel.js"
 import { Auth, configFilePath, Graph, loadConfig, makeLogger, PLUGIN_NAME } from "./core.js"
-import { removeRegistry, startIpcServer, sweepStaleRegistry, writeRegistry, type RegistryEntry } from "./ipc.js"
+import {
+  holdAtMost,
+  removeRegistry,
+  startIpcServer,
+  STOP_WAIT_MS,
+  sweepStaleRegistry,
+  writeRegistry,
+  type RegistryEntry,
+} from "./ipc.js"
 import { McpServer } from "./mcp.js"
 
 function packageVersion(): string {
@@ -87,7 +95,13 @@ async function main(): Promise<void> {
     sweepStaleRegistry()
     const ipc = await startIpcServer(
       {
-        stop: (body) => background("stop.crash", ch.handleStop(body)),
+        // 발신이 끝날 때까지 hook 응답을 잡아둔다. 곧바로 응답하면 `claude -p` 처럼 턴 직후 종료할 때
+        // 서버가 발신 전에 종료된다 (STOP_WAIT_MS 주석).
+        stop: (body) =>
+          holdAtMost(
+            ch.handleStop(body).catch((e) => log.error("stop.crash", { error: String(e) })),
+            STOP_WAIT_MS,
+          ),
         // 결정이 날 때까지 hook 의 요청을 잡아둔다. 실패는 결정 없음으로 돌려 터미널 다이얼로그에 맡긴다.
         permission: (body, signal) =>
           ch

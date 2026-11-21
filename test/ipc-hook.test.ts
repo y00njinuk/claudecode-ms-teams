@@ -7,6 +7,7 @@ import { NOOP_LOG } from "../src/core"
 import { buildPayload, candidatePids, permissionOutput } from "../src/hook"
 import {
   findSession,
+  holdAtMost,
   readRegistry,
   registryPath,
   removeRegistry,
@@ -64,6 +65,15 @@ describe("IPC server", () => {
     expect((await post("stop", { [TOKEN_HEADER]: ipc.token }, JSON.stringify({ text: "hi" }))).status).toBe(202)
     expect(got).toEqual([{ text: "hi" }])
     ipc.close()
+  })
+
+  test("holdAtMost 는 작업이 끝나거나 제한 시간이 지나면 resolve 하고, 작업 실패를 밖으로 던지지 않는다", async () => {
+    const t0 = Date.now()
+    await holdAtMost(new Promise((r) => setTimeout(r, 30)), 5_000)
+    expect(Date.now() - t0).toBeLessThan(1_000)
+    await holdAtMost(new Promise(() => {}), 50)
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(50)
+    await holdAtMost(Promise.reject(new Error("graph down")), 5_000)
   })
 
   test("Promise 를 돌려주는 핸들러는 resolve 될 때까지 응답을 잡아두고 값을 JSON 으로 보낸다", async () => {
