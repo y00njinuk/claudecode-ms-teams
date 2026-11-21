@@ -1,0 +1,16 @@
+{
+  "name": "claudecode-ms-teams",
+  "owner": {
+    "name": "Jin Uk Yoon"
+  },
+  "metadata": {
+    "description": "Claude Code ↔ Microsoft Teams 채널 플러그인 (npm 패키지 claudecode-ms-teams 가 설치 경로를 이 마켓플레이스로 등록한다)"
+  },
+  "plugins": [
+    {
+      "name": "microsoft-teams",
+      "source": "./",
+      "description": "Microsoft Teams channel for Claude Code — 응답 발신, 채팅방 메시지 요청 주입, 권한·질문 Teams 답장 응답 (Graph delegated + polling)"
+    }
+  ]
+}

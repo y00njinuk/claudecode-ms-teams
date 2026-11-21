@@ -1,0 +1,16 @@
+{
+  "name": "microsoft-teams",
+  "version": "0.3.0",
+  "description": "Microsoft Teams channel for Claude Code — 턴 종료 시 응답을 Teams 채팅으로 보내고, 연동한 Teams 채팅방의 메시지를 키워드 없이 세션에 전달하며, 권한 요청과 질문(AskUserQuestion)에 코드 없는 Teams 답장(#allow · #allow-always · #reject · 답 · #skip)으로 응답한다. Graph delegated 권한 + 폴링 방식이라 봇·공개 엔드포인트가 필요 없다.",
+  "author": {
+    "name": "Jin Uk Yoon"
+  },
+  "license": "MIT",
+  "keywords": ["microsoft-teams", "channel", "mcp", "microsoft-graph"],
+  "mcpServers": {
+    "microsoft-teams": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/server.js"]
+    }
+  }
+}
