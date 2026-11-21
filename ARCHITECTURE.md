@@ -31,9 +31,10 @@ Claude Code 의 세 가지 확장점(채널 MCP 서버 · command hook · skill)
 | `src/mcp.ts` | newline-delimited JSON-RPC MCP 서버 (initialize · ping · tools/list · tools/call · notification) |
 | `src/channel.ts` | 세션 상태 머신: 도구(connect / select_chat / status / disconnect), Stop 발신, 폴링, 권한·질문 대기와 답장 처리 |
 | `src/server.ts` | MCP 서버 진입점. channel · Auth · IPC 를 조립하고 종료 시 레지스트리를 정리 |
-| `src/ipc.ts` | hook → 서버 localhost IPC (즉시 202 / 결정까지 대기) 와 `run/<claudePid>.json` 레지스트리 |
+| `src/ipc.ts` | hook → 서버 localhost IPC (즉시 202 / 발신 · 결정까지 대기) 와 `run/<claudePid>.json` 레지스트리 |
 | `src/hook.ts` | command hook 클라이언트. 항상 exit 0, stdout 은 PermissionRequest 결정에만 쓴다 |
 | `src/install.ts` · `src/cli.ts` · `postinstall.mjs` | 로컬 마켓플레이스 등록 · 플러그인 설치 · 진단 |
+| `src/send.ts` | 세션 없이 Teams 채팅방으로 한 건 보내는 `send` CLI (예약 작업 보고용) |
 | `.claude-plugin/plugin.json` | 플러그인 매니페스트 (`mcpServers` 인라인) |
 | `.claude-plugin/marketplace.json` | 패키지 루트 자체를 마켓플레이스로 노출 (`source: "./"`) |
 | `hooks/hooks.json` | `Stop` · `StopFailure` → `hook.js stop`, `SubagentStop` → `hook.js subagent-stop`, `PermissionRequest(*)` → `hook.js permission`, `PostToolUse(AskUserQuestion)` → `hook.js answered` |
@@ -61,14 +62,16 @@ Claude Code 는 stdio MCP 서버와 command hook 을 모두 `claude` 프로세�
 - hook: `CLAUDE_PID` 환경변수 → `process.ppid` 순서로 레지스트리 조회
 - `session_id` 는 키로 쓰지 않는다. `/clear` 에서 바뀌지만 MCP 서버 프로세스는 그대로이기 때문이다.
 - `active=false` (채팅방 미선택) 면 hook 은 HTTP 호출 없이 끝난다. 매 턴 발화하는 Stop hook 의 비용을 줄이기 위함.
-- 서버는 `stop` · `answered` · `subagent-stop` 요청에 즉시 202 로 응답하고 Graph 호출은 비동기로 한다 (hook timeout 과 무관하게).
-  `permission` 요청만 결정이 날 때까지 응답을 잡아둔다 (아래 "권한 · 질문 응답").
+- 서버는 `answered` · `subagent-stop` 요청에 즉시 202 로 응답한다. `stop` 은 Teams 발신이 끝날 때까지 (최대 `STOP_WAIT_MS` = 8초),
+  `permission` 은 결정이 날 때까지 응답을 잡아둔다 (아래 "발신 파이프라인", "권한 · 질문 응답").
 - 기동 시 죽은 서버의 레지스트리를 sweep 하고, 종료(stdin EOF / SIGTERM / SIGINT / SIGHUP) 시 자기 파일만 지운다.
+  Claude Code 는 종료할 때 stdin 을 먼저 닫지 않고 SIGINT → (100ms) SIGTERM → (400ms) SIGKILL 을 보낸다 (2.1.330 `-p` 실측).
 
 ## Lazy connect
 
 플러그인을 설치하면 모든 세션에서 MCP 서버가 뜨지만, `connect` / `select_chat` 도구가 호출되기 전에는
 Azure · Graph 로 어떤 요청도 보내지 않는다. 인증 이벤트(재로그인 안내, 로그인 완료)도 connect 이후에만 채널로 보낸다.
+`send` CLI 는 사용자가 직접 실행하는 별도 프로세스라 이 규칙의 대상이 아니다.
 
 ## 인증 보호
 
@@ -100,6 +103,11 @@ Stop hook → POST /stop {session_id, cwd, text}
        └─ Graph POST → sentIds.add(mid), lastActivity 갱신
 ```
 
+Stop hook 은 발신이 끝날 때까지 기다린다. 서버가 `holdAtMost(handleStop, STOP_WAIT_MS)` 로 응답을 최대 8초 잡아두고, hook 의 IPC 대기(`ipcTimeoutMs("stop")`)는
+그보다 1초 길며 hooks.json 의 Stop timeout(10초)보다 짧다 (테스트로 강제). Claude Code 2.1.330 `-p` 실측으로 Stop hook 이 실행되는 동안에는 MCP 서버가 살아 있고,
+hook 이 끝나면 곧바로 서버에 SIGINT 를 보내 0.5초 안에 SIGKILL 한다. 그래서 202 로 먼저 응답하면 `claude -p` 처럼 턴 직후 종료하는 실행에서 마지막 응답이 발신 전에 사라진다.
+8초가 지나면 응답만 돌려주고 발신은 취소하지 않는다 (429 `Retry-After` 대기 등). 채팅방이 연동된 세션은 턴 종료 처리가 발신 시간만큼 늦어진다.
+
 Stop 은 턴마다 한 번 발화하므로 OpenCode 판의 무기한 fingerprint 가드는 쓰지 않는다 (같은 답을 반복하는 정상 대화가 막힌다).
 커서는 발신 시점에 전진시키지 않는다. 자기 발신은 `sentIds` 로 거른다.
 
@@ -108,6 +116,18 @@ Stop 은 턴마다 한 번 발화하므로 OpenCode 판의 무기한 fingerprint
 
 렌더러(`mdToHtml`)는 코드 블록·표를 placeholder 로 빼둔 뒤 나머지 텍스트만 escape 하고 되돌린다.
 렌더 결과처럼 생긴 원문 HTML 을 분할 기준으로 쓰면 escape 없이 통과한다.
+
+## 세션 없는 발신 (`send` CLI)
+
+`claudecode-ms-teams send --chat <19:...> [--file <경로>] [--title <제목>]` 은 Claude Code 세션 없이 Markdown 한 건을 보낸다.
+예약 작업이 `claude -p` 결과를 보고하는 용도다. `select_chat` · Stop hook 을 거치지 않으므로 세션 안에서 도구를 허용하거나 발신 완료를 로그로 확인할 필요가 없고,
+보고 세션이 채팅방을 연동하지 않으니 권한 요청이 Teams 답장을 기다리며 멈추지도 않는다.
+
+- 저장된 `tokens.json` 만 쓴다. 만료됐으면 서버와 같은 `Auth` 로 refresh 해 원자적으로 저장하지만 device flow 는 시작하지 않는다 (무인 출력으로 코드가 새면 다른 사람이 로그인할 수 있다).
+- 메시지는 `[<제목> · -]` 헤더로 시작한다 (기본 제목은 현재 디렉토리 이름). 같은 채팅방에 연동된 세션이 이 메시지를 요청으로 주입하지 않는다 (`isPluginMessage`).
+- 진단은 stderr 로만 쓴다. 플러그인 로그(`makeLogger`)는 시작할 때 파일을 비우므로 실행 중인 세션의 로그를 지우지 않도록 쓰지 않는다.
+- 종료 코드: 0 전송됨 · 1 발신 실패 (네트워크 · Graph 오류) · 2 사용법 오류 (인자 · 빈 본문 · 파일 읽기) · 3 설정 · 로그인 필요 (azure 미설정 · 토큰 없음 · refresh `invalid_grant`).
+- chatId 는 인자로만 받는다. 설정 파일에 기본 채팅방을 두지 않는다 (chatId 는 세션 메모리 전용이라는 원칙과 설정 단일 소스 원칙을 유지한다).
 
 ## 수신 파이프라인 (폴링)
 

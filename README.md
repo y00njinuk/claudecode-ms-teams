@@ -7,6 +7,7 @@ Claude Code ↔ Microsoft Teams 양방향 채널 플러그인.
 - 도구 실행 권한 요청, 질문(AskUserQuestion · interview), plan 승인을 Teams 로 알리고, **코드 입력 없이 Teams 답장만으로 응답**할 수 있다
   (`#allow` · `#allow-always` · `#reject` · 답 그대로 · `#skip`). `#allow-always` 한 번이면 그 도구는 세션이 끝날 때까지 다시 묻지 않는다.
   터미널 다이얼로그도 그대로 떠 있어 먼저 한 응답이 적용된다.
+- `claudecode-ms-teams send` 로 세션 없이 스크립트(예약 작업 보고 등)에서 Teams 로 보내고 결과를 종료 코드로 받는다.
 
 Microsoft Graph **delegated 권한 + 폴링** 방식이라 Azure Bot, 공개 HTTPS 엔드포인트(터널), Teams 앱 업로드가 필요 없다.
 메시지는 봇이 아니라 로그인한 본인 계정으로 올라간다.
@@ -70,6 +71,9 @@ claude --dangerously-load-development-channels plugin:microsoft-teams@claudecode
 
 > Channels 는 research preview 기능이다. 이 플러그인은 Anthropic allowlist 에 없으므로 채널 모드로 실행할 때마다
 > `--dangerously-load-development-channels` 플래그가 필요하다 (조직 관리자가 `allowedChannelPlugins` 에 등록하면 `--channels` 로 실행 가능).
+
+턴이 끝나면 Stop hook 이 Teams 발신이 끝날 때까지 (최대 8초) 기다린다. 그래서 `claude -p` 처럼 응답 직후 종료해도 마지막 응답이 전송된다.
+스크립트에서 결과만 보내려면 세션을 연동하지 말고 [`send`](#6-스크립트에서-보내기-send) 를 쓴다.
 
 ### 3. 연동
 
@@ -190,6 +194,26 @@ Teams 답장으로도 응답 가능:
 - 확인 메시지는 `✅ 전달됨` 이다. Claude Code 가 적용 결과를 알려주지 않으므로, 같은 턴 안에 터미널에서 이미 응답한 권한 요청에 뒤늦게 답하면 전달은 되지만 적용되지 않는다.
 - sub-agent 가 낸 요청에는 `🌿 sub-agent <이름>` 배너가 붙는다.
 
+### 6. 스크립트에서 보내기 (`send`)
+
+세션 없이 Markdown 한 건을 채팅방으로 보낸다. 예약 작업이 `claude -p` 결과를 아침에 보고하는 경우처럼 무인 스크립트에서 쓴다.
+
+```bash
+cat results/pending/*.md | claude -p "$(cat prompts/report.md)" > report.md
+claudecode-ms-teams send --chat "19:...@thread.v2" --title claude-nightly --file report.md   # --file 생략 시 stdin
+```
+
+| 종료 코드 | 의미 | 조치 |
+|---|---|---|
+| 0 | 전송됨 (stdout 에 message id) | — |
+| 1 | 발신 실패 (네트워크 · Graph 오류, 원인은 stderr) | chatId · 네트워크 확인 후 재시도 |
+| 2 | 사용법 오류 (인자 · 빈 본문 · 파일 읽기) | 인자 확인 |
+| 3 | 설정 · 로그인 필요 (azure 미설정 · 토큰 없음 · 만료) | 대화형 `claude` 에서 `/microsoft-teams:connect` 로 로그인 |
+
+- 대화형 세션에서 한 번 로그인해 둔 `tokens.json` 을 쓴다. `send` 는 로그인(device code)을 시작하지 않는다.
+- chatId 는 `/microsoft-teams:connect` 목록에 나온 `19:...` 값이다. 메시지는 `[<제목> · -]` 헤더로 시작해 같은 채팅방에 연동된 세션에는 전달되지 않는다.
+- 본문이 Teams 메시지 크기(약 25KB HTML)를 넘으면 뒷부분을 자르고 알린다.
+
 ### 보안
 
 - 세션을 조작할 수 있는 사람은 **로그인한 본인**뿐이다. 동료에게 허용하려면 `access.allowedUserIds` 에 Entra 사용자 ID 를 넣는다.
@@ -229,6 +253,8 @@ Teams 답장으로도 응답 가능:
 claudecode-ms-teams install             Claude Code 에 플러그인 등록 (업그레이드 후에는 버전 기록 갱신)
 claudecode-ms-teams uninstall [--purge] 등록 해제 (--purge: 설정·토큰도 삭제)
 claudecode-ms-teams doctor              설치 상태 진단
+claudecode-ms-teams send --chat <19:...> [--file <경로>] [--title <제목>]
+                                        세션 없이 채팅방으로 한 건 발신 (종료 코드 0 · 1 · 2 · 3)
 ```
 
 ## 제거
