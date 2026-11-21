@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { MicrosoftTeamsChannel, type AuthPort, type GraphPort, type HookDecision } from "../src/channel"
 import { defaultConfig, isInsideWorkspace, mergeConfig, NOOP_LOG, type ChatMsg, type Config, type DeviceCode } from "../src/core"
+import { sendToChat } from "../src/send"
 
 const CHAT_ID = "19:abc123@thread.v2"
 const ME = { id: "me-1", displayName: "나" }
@@ -316,9 +317,22 @@ describe("Teams 메시지 수신 (자동 전달)", () => {
       "🔒 자동 승인 해제",
     ])
 
+    // 세션 없이 보내는 CLI 발신(claudecode-ms-teams send)도 같은 헤더를 쓴다.
+    const cli: string[] = []
+    const viaCli = await sendToChat(
+      {
+        cfg: configured(),
+        configPath: "",
+        auth: { hasRefreshToken: () => true },
+        graph: { sendMessage: async (_chatId, html) => (cli.push(html), "1") },
+      },
+      { chatId: CHAT_ID, title: "claude-nightly", text: "야간 작업 보고" },
+    )
+    expect(viaCli.code).toBe(0)
+
     const s = await connected()
     await s.ask({ tool_name: "Bash", tool_input: { command: "pwd" } })
-    for (const m of other.sent) s.receive(m.html.replace(/^<p>|<\/p>$/g, ""))
+    for (const html of [...other.sent.map((m) => m.html), ...cli]) s.receive(html.replace(/^<p>|<\/p>$/g, ""))
     await s.channel.pollOnce()
     expect(s.pushes).toHaveLength(0)
     expect(s.sent).toHaveLength(1)

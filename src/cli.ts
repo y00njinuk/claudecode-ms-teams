@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// claudecode-ms-teams install | uninstall [--purge] | doctor
+// claudecode-ms-teams install | uninstall [--purge] | doctor | send
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { doctor, install, uninstall } from "./install.js"
+import { runSend, SEND_USAGE } from "./send.js"
 
 const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -12,9 +13,11 @@ const HELP = `claudecode-ms-teams — Claude Code ↔ Microsoft Teams 채널 플
   claudecode-ms-teams install            Claude Code 에 플러그인 등록 (npm 글로벌 설치 시 자동 실행)
   claudecode-ms-teams uninstall [--purge] 플러그인 등록 해제 (--purge: 설정·토큰도 삭제)
   claudecode-ms-teams doctor             설치 상태 진단
+
+${SEND_USAGE}
 `
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   const cmd = argv[0] ?? "help"
   if (cmd === "install") {
     const r = install({ packageDir: PACKAGE_DIR })
@@ -38,13 +41,18 @@ function main(argv: string[]): number {
     for (const c of checks) console.log(`${c.ok ? "✓" : "✗"} ${c.label}: ${c.detail}`)
     return checks.every((c) => c.ok) ? 0 : 1
   }
+  if (cmd === "send") return runSend(argv.slice(1))
   console.log(HELP)
   return cmd === "help" || cmd === "--help" || cmd === "-h" ? 0 : 1
 }
 
-try {
-  process.exitCode = main(process.argv.slice(2))
-} catch (e) {
-  console.error(`✗ ${(e as Error).message}`)
-  process.exitCode = 1
-}
+// process.exit 는 파이프로 나가는 출력을 자를 수 있어 exitCode 만 정한다.
+main(process.argv.slice(2)).then(
+  (code) => {
+    process.exitCode = code
+  },
+  (e) => {
+    console.error(`✗ ${(e as Error).message}`)
+    process.exitCode = 1
+  },
+)
