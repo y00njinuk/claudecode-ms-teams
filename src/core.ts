@@ -19,6 +19,23 @@ export const CHANNEL_LAUNCH_COMMAND = `claude --dangerously-load-development-cha
 export const REQUIRED_SCOPES =
   "Chat.Create Chat.Read Chat.ReadBasic Chat.ReadWrite ChatMessage.Read ChatMessage.Send offline_access User.Read"
 
+// Microsoft To Do 는 선택 기능이다. azure.scopes 에 이 scope 가 있을 때만 todo_* 도구를 노출한다 (REQUIRED_SCOPES 와 별개).
+export const TODO_SCOPE_RW = "Tasks.ReadWrite"
+export const TODO_SCOPE_R = "Tasks.Read"
+export type TodoAccess = "readwrite" | "read" | "none"
+
+// 토큰 응답의 scope 는 `https://graph.microsoft.com/Tasks.ReadWrite` 처럼 resource 가 붙어 올 수 있고, scope 는 대소문자를 구분하지 않는다.
+function scopeName(scope: string): string {
+  return scope.slice(scope.lastIndexOf("/") + 1).toLowerCase()
+}
+
+export function todoAccess(scopes: string | null | undefined): TodoAccess {
+  const names = (scopes ?? "").split(/\s+/).filter(Boolean).map(scopeName)
+  if (names.includes(TODO_SCOPE_RW.toLowerCase())) return "readwrite"
+  if (names.includes(TODO_SCOPE_R.toLowerCase())) return "read"
+  return "none"
+}
+
 // ---------- 트리거 ----------
 
 // Microsoft Teams chat ID (group `19:...@thread.v2` / 1:1 `19:...@unq.gbl.spaces`).
@@ -171,6 +188,8 @@ export type Config = {
   access: { allowedUserIds: string[] }
   log: { file: string; enabled: boolean }
   tokens: { file: string }
+  // timeZone: To Do 기한 · 알림을 해석할 시간대 (IANA 또는 Windows 이름). 빈 문자열이면 시스템 시간대.
+  todo: { timeZone: string }
 }
 
 export const DEFAULT_POLL_MS = 5000
@@ -210,6 +229,7 @@ export function defaultConfig(): Config {
     access: { allowedUserIds: [] },
     log: { file: path.join(dd, LOG_FILE_NAME), enabled: false },
     tokens: { file: path.join(dd, TOKENS_FILE_NAME) },
+    todo: { timeZone: "" },
   }
 }
 
@@ -221,6 +241,7 @@ export function mergeConfig(base: Config, partial: unknown): Config {
     return v && typeof v === "object" && !Array.isArray(v) ? ({ ...def, ...(v as object) } as T) : def
   }
   const access = pick("access", base.access)
+  const todo = pick("todo", base.todo)
   return {
     azure: pick("azure", base.azure),
     polling: pick("polling", base.polling),
@@ -231,6 +252,7 @@ export function mergeConfig(base: Config, partial: unknown): Config {
     },
     log: pick("log", base.log),
     tokens: pick("tokens", base.tokens),
+    todo: { timeZone: typeof todo.timeZone === "string" ? todo.timeZone.trim() : "" },
   }
 }
 

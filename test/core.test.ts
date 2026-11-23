@@ -22,6 +22,7 @@ import {
   renderHeader,
   renderOutbound,
   shortSessionId,
+  todoAccess,
   TRIGGER_RE,
   type Config,
 } from "../src/core"
@@ -245,6 +246,24 @@ describe("config", () => {
     expect(cfg.polling.backoff1Ms).toBe(defaultConfig().polling.backoff1Ms)
     expect(azureConfigured(cfg)).toBe(false)
     expect(azureConfigured(mergeConfig(cfg, { azure: { tenantId: "t", clientId: "c", scopes: "s" } }))).toBe(true)
+  })
+
+  test("todo 섹션은 timeZone 문자열만 받고 없으면 빈 값(시스템 시간대)이다", () => {
+    expect(defaultConfig().todo).toEqual({ timeZone: "" })
+    expect(mergeConfig(defaultConfig(), { todo: { timeZone: " Asia/Seoul " } }).todo).toEqual({ timeZone: "Asia/Seoul" })
+    expect(mergeConfig(defaultConfig(), { todo: { timeZone: 9 } }).todo).toEqual({ timeZone: "" })
+    expect(mergeConfig(defaultConfig(), { todo: "Asia/Seoul" }).todo).toEqual({ timeZone: "" })
+  })
+
+  test("todoAccess 는 Tasks.ReadWrite > Tasks.Read > 없음 순으로 판정한다 (대소문자 · resource 접두 무시)", () => {
+    expect(todoAccess("Chat.Read offline_access Tasks.ReadWrite User.Read")).toBe("readwrite")
+    expect(todoAccess("Tasks.Read Tasks.ReadWrite")).toBe("readwrite")
+    expect(todoAccess("Chat.Read tasks.read")).toBe("read")
+    expect(todoAccess("https://graph.microsoft.com/Tasks.ReadWrite openid")).toBe("readwrite")
+    expect(todoAccess("Chat.Read Tasks.ReadWrite.Shared")).toBe("none")
+    expect(todoAccess("Chat.Read User.Read")).toBe("none")
+    expect(todoAccess("")).toBe("none")
+    expect(todoAccess(null)).toBe("none")
   })
 
   test("delayFor 는 경과 시간에 따라 1x/3x/6x 로 늘어난다", () => {
