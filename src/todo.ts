@@ -103,15 +103,14 @@ export function parseReminder(v: string, timeZone: string): DateTimeTimeZone | n
   return { dateTime: `${m[1]}-${m[2]}-${m[3]}T${m[4] ?? "09"}:${m[5] ?? "00"}:00`, timeZone }
 }
 
-// Graph 는 응답의 날짜를 UTC 로 준다. 설정 시간대가 IANA 이름이면 그 시간대로 바꿔 보여준다
-// (Windows 이름이면 변환 표 없이 받은 값 그대로).
+// Graph 는 응답의 날짜를 UTC 로 준다. 설정 시간대로 바꿔 보여준다. 설정이 Windows 이름이면 변환 표가 없으므로
+// 시스템 시간대(IANA)로 바꾼다 — UTC 그대로 두면 기한 날짜가 하루 어긋나 보인다.
 export function localDateTime(d: DateTimeTimeZone | null | undefined, timeZone: string): { value: string; timeZone: string } | undefined {
   if (!d?.dateTime) return undefined
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(d.dateTime)
   if (!m) return { value: d.dateTime, timeZone: d.timeZone }
-  if (!/^utc$/i.test(d.timeZone ?? "") || !isIanaZone(timeZone)) {
-    return { value: `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}`, timeZone: d.timeZone }
-  }
+  if (!/^utc$/i.test(d.timeZone ?? "")) return { value: `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}`, timeZone: d.timeZone }
+  if (!isIanaZone(timeZone)) timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
   const instant = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]))
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-CA", {
@@ -293,15 +292,19 @@ export function todoTools(access: TodoAccess, deps: TodoDeps): Tool[] {
     if (!satisfies(todoAccess(deps.cfg.azure.scopes), need)) {
       throw new Error(`설정의 azure.scopes 에 ${scopeLabel(need)} 가 없습니다. 설정을 고친 뒤 Claude Code 세션을 다시 시작하세요.`)
     }
-    await auth.refreshWithTodoScopes()
+    const refreshed = await auth.refreshWithTodoScopes()
     if (tokenOk()) return
     if (auth.todoConsentRequired()) throw new Error(`Microsoft To Do 권한(Tasks) 동의가 필요합니다. ${RELOGIN_HINT}`)
+    if (!refreshed) {
+      if (!auth.hasRefreshToken()) throw new Error(`Microsoft 로그인이 만료되었습니다. ${LOGIN_HINT}`)
+      throw new Error("Tasks 권한을 받기 위한 토큰 갱신에 실패했습니다 (네트워크 등). 잠시 후 다시 시도하세요.")
+    }
     throw new Error(`저장된 로그인 토큰에 ${scopeLabel(need)} 권한이 없습니다 (scope 추가 전에 로그인했거나 다른 세션이 예전 scope 로 갱신). ${RELOGIN_HINT}`)
   }
 
-  const call = async (method: GraphMethod, url: string, body?: object, withDates = false): Promise<any> => {
+  const call = async (method: GraphMethod, url: string, body?: Record<string, unknown>): Promise<any> => {
     const r = await graph.request(method, url, body)
-    if (!r.ok) throw new Error(describeFailure(r, deps, withDates))
+    if (!r.ok) throw new Error(describeFailure(r, deps, Boolean(body?.dueDateTime || body?.reminderDateTime)))
     return r.body
   }
 
@@ -415,7 +418,7 @@ export function todoTools(access: TodoAccess, deps: TodoDeps): Tool[] {
         const zoneNow = tz()
         const body = taskPatch({ ...a, status: undefined }, zoneNow)
         const list = await listOf(a)
-        const task = await call("POST", tasksUrl(list.id), body, true)
+        const task = await call("POST", tasksUrl(list.id), body)
         // 생성 본문에 checklistItems 를 함께 넣는 방식은 확인하지 못해, 문서화된 checklistItems 생성 API 로 하나씩 만든다.
         const items: Array<Record<string, any>> = []
         for (const displayName of checklist as string[]) {
@@ -448,7 +451,7 @@ export function todoTools(access: TodoAccess, deps: TodoDeps): Tool[] {
         const patch = taskPatch(a, zoneNow)
         if (!Object.keys(patch).length) throw new Error("수정할 필드가 없습니다 (title · body · importance · status · dueDate · reminder).")
         const list = await listOf(a)
-        return summarizeTask(await call("PATCH", taskUrl(list.id, taskId), patch, true), zoneNow, true)
+        return summarizeTask(await call("PATCH", taskUrl(list.id, taskId), patch), zoneNow, true)
       },
     },
     {
@@ -491,6 +494,7 @@ export function todoTools(access: TodoAccess, deps: TodoDeps): Tool[] {
         const isChecked = optBoolean(a, "isChecked")
         const itemId = action === "add" ? "" : requireString(a, "itemId")
         if (action === "add" && !displayName?.trim()) throw new Error("add 에는 displayName 이 필요합니다.")
+        if (displayName !== undefined && !displayName.trim()) throw new Error("displayName 이 비어 있습니다.")
         const patch = { ...(displayName !== undefined ? { displayName } : {}), ...(isChecked !== undefined ? { isChecked } : {}) }
         if (action === "update" && !Object.keys(patch).length) throw new Error("update 에는 displayName 또는 isChecked 가 필요합니다.")
         const list = await listOf(a)

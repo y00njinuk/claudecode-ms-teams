@@ -37,6 +37,7 @@ function harness(
     scopes?: string
     tokenScope?: string | null
     refreshedScope?: string | null
+    refreshResult?: string | null
     consent?: boolean
     hasToken?: boolean
     reloaded?: Config
@@ -61,7 +62,7 @@ function harness(
       refreshWithTodoScopes: async () => {
         refreshes++
         if (opts.refreshedScope !== undefined) scope = opts.refreshedScope
-        return "token"
+        return opts.refreshResult === undefined ? "token" : opts.refreshResult
       },
     },
     graph: {
@@ -175,10 +176,12 @@ describe("날짜 변환", () => {
       value: "2026-11-25T00:00",
       timeZone: "Asia/Seoul",
     })
-    expect(localDateTime({ dateTime: "2026-11-25T05:30:00.0000000", timeZone: "UTC" }, "Korea Standard Time")).toEqual({
-      value: "2026-11-25T05:30",
-      timeZone: "UTC",
-    })
+    // Windows 이름은 변환 표가 없어 시스템 시간대(IANA)로 바꾼다. UTC 그대로 두면 기한이 하루 어긋나 보인다.
+    const system = Intl.DateTimeFormat().resolvedOptions().timeZone
+    expect(localDateTime({ dateTime: "2026-11-25T05:30:00.0000000", timeZone: "UTC" }, "Korea Standard Time")).toEqual(
+      localDateTime({ dateTime: "2026-11-25T05:30:00.0000000", timeZone: "UTC" }, system),
+    )
+    expect(localDateTime({ dateTime: "2026-11-25T05:30:00.0000000", timeZone: "UTC" }, "Korea Standard Time")?.timeZone).toBe(system)
     expect(localDateTime({ dateTime: "2026-11-25T09:00:00", timeZone: "Korea Standard Time" }, "Asia/Seoul")).toEqual({
       value: "2026-11-25T09:00",
       timeZone: "Korea Standard Time",
@@ -388,6 +391,7 @@ describe("도구 호출", () => {
     expect((await h.run("todo_checklist", { taskId: "T1", action: "delete" })).text).toContain("itemId")
     expect((await h.run("todo_checklist", { taskId: "T1", action: "toggle" })).text).toContain("add | update | delete")
     expect((await h.run("todo_checklist", { taskId: "T1", action: "update", itemId: "C1", isChecked: "yes" })).text).toContain("true 또는 false")
+    expect((await h.run("todo_checklist", { taskId: "T1", action: "update", itemId: "C1", displayName: " " })).text).toContain("비어 있습니다")
     expect(h.calls).toHaveLength(0)
   })
 })
@@ -419,6 +423,10 @@ describe("오류 매핑", () => {
     const dated = await h.run("todo_update_task", { taskId: "T1", dueDate: "2026-11-25" })
     expect(dated.text).toContain("todo.timeZone")
     expect(dated.text).toContain("Asia/Seoul")
+    // 날짜를 보내지 않은 요청(예: flaggedEmails 목록에 생성)에는 시간대 안내를 붙이지 않는다.
+    const undated = await h.run("todo_update_task", { taskId: "T1", title: "x" })
+    expect(undated.text).toContain("TimeZone not supported")
+    expect(undated.text).not.toContain("todo.timeZone")
   })
 
   test("429 · 5xx · 네트워크 · 인증서 · 본문 오류", async () => {
@@ -460,6 +468,14 @@ describe("토큰 scope 불일치", () => {
     expect(missing.calls).toHaveLength(0)
     const consent = harness({ tokenScope: "Chat.Read", refreshedScope: "Chat.Read", consent: true })
     expect((await consent.run("todo_list_lists")).text).toContain("동의가 필요합니다")
+  })
+
+  test("Tasks 권한을 받기 위한 갱신 자체가 실패하면 재로그인이 아니라 재시도를 안내한다", async () => {
+    const h = harness({ tokenScope: "Chat.Read", refreshResult: null })
+    const r = await h.run("todo_list_lists")
+    expect(r.text).toContain("토큰 갱신에 실패")
+    expect(r.text).not.toContain("relogin")
+    expect(h.calls).toHaveLength(0)
   })
 
   test("조회 도구는 Tasks.Read 토큰으로 충분하고, 쓰기 도구는 Tasks.ReadWrite 가 필요하다", async () => {
