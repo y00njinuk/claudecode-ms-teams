@@ -15,6 +15,7 @@ import {
   NOOP_LOG,
   generateReplyCode,
   isInsideWorkspace,
+  isConsentRequired,
   isPluginMessage,
   cleanInbound,
   payloadVerbatim,
@@ -24,6 +25,7 @@ import {
   shortSessionId,
   todoAccess,
   TRIGGER_RE,
+  withoutTodoScopes,
   type Config,
 } from "../src/core"
 
@@ -436,6 +438,69 @@ describe("Auth / Graph (fetch stub)", () => {
     expect(auth.hasRefreshToken()).toBe(false)
     expect(auth.pendingDeviceCode()).toBeNull()
     auth.dispose()
+  })
+
+  const CONSENT_REQUIRED = JSON.parse(fs.readFileSync(path.join(import.meta.dir, "fixtures/aad-consent-required.json"), "utf8"))
+
+  // refresh 요청의 scope 를 기록하고, Tasks scope 가 들어 있으면 consent_required 로 거절하는 token endpoint.
+  const stubConsentEndpoint = () => {
+    const scopes: string[] = []
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const scope = new URLSearchParams(String(init?.body ?? "")).get("scope") ?? ""
+      scopes.push(scope)
+      if (/Tasks\./.test(scope)) return Response.json(CONSENT_REQUIRED, { status: 400 })
+      return Response.json({ access_token: `at-${scopes.length}`, expires_in: 3600, scope: "Chat.Read User.Read" })
+    }) as typeof fetch
+    return scopes
+  }
+
+  test("consent_required 판정은 error · suberror · error_codes · 설명의 AADSTS65001 을 본다", () => {
+    expect(isConsentRequired(CONSENT_REQUIRED)).toBe(true)
+    expect(isConsentRequired({ error: "invalid_grant", error_codes: [65001] })).toBe(true)
+    expect(isConsentRequired({ error: "invalid_grant", error_description: "AADSTS65001: not consented" })).toBe(true)
+    expect(isConsentRequired({ error: "invalid_grant", error_codes: [70008] })).toBe(false)
+    expect(isConsentRequired({ error: "interaction_required", suberror: "consent_required" })).toBe(false)
+    expect(withoutTodoScopes("Chat.Read  Tasks.ReadWrite offline_access tasks.read https://graph.microsoft.com/Tasks.Read")).toBe("Chat.Read offline_access")
+  })
+
+  test("To Do scope 동의가 없어 refresh 가 거절되면 폐기하지 않고 To Do scope 없이 다시 받는다 (Teams 계속 동작)", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() - 1000 })
+    cfg.azure.scopes = "Chat.Read offline_access Tasks.ReadWrite User.Read"
+    const scopes = stubConsentEndpoint()
+    let reauth = 0
+    const auth = new Auth(cfg, NOOP_LOG, { onReauthRequired: () => reauth++ })
+    expect(await auth.getAccessToken()).toBe("at-2")
+    expect(scopes).toEqual(["Chat.Read offline_access Tasks.ReadWrite User.Read", "Chat.Read offline_access User.Read"])
+    expect(reauth).toBe(0)
+    expect(auth.hasRefreshToken()).toBe(true)
+    expect(auth.todoConsentRequired()).toBe(true)
+    expect(auth.tokenScope()).toBe("Chat.Read User.Read")
+    // 이후 refresh 는 거절될 scope 를 다시 보내지 않는다.
+    expect(await auth.forceRefresh()).toBe("at-3")
+    expect(scopes[2]).toBe("Chat.Read offline_access User.Read")
+    // To Do 도구는 전체 scope 로 다시 시도한다.
+    expect(await auth.refreshWithTodoScopes()).toBe("at-5")
+    expect(scopes.slice(3)).toEqual(["Chat.Read offline_access Tasks.ReadWrite User.Read", "Chat.Read offline_access User.Read"])
+    expect(auth.todoConsentRequired()).toBe(true)
+    auth.dispose()
+  })
+
+  test("To Do scope 없이도 consent_required 면 기존처럼 폐기로 처리한다", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() - 1000 })
+    stubFetch(() => Response.json(CONSENT_REQUIRED, { status: 400 }))
+    let reauth = 0
+    const auth = new Auth(cfg, NOOP_LOG, { onReauthRequired: () => reauth++ })
+    expect(await auth.getAccessToken()).toBeNull()
+    expect(reauth).toBe(1)
+    expect(auth.hasRefreshToken()).toBe(false)
+    expect(auth.todoConsentRequired()).toBe(false)
+    auth.dispose()
+  })
+
+  test("tokenScope 는 저장된 토큰의 scope 를 읽고 없으면 null 이다", () => {
+    expect(new Auth(cfgWithTokens({ access_token: "a", refresh_token: "r", scope: "Tasks.Read" }), NOOP_LOG).tokenScope()).toBe("Tasks.Read")
+    expect(new Auth(cfgWithTokens({ access_token: "a", refresh_token: "r" }), NOOP_LOG).tokenScope()).toBeNull()
+    expect(new Auth(cfgWithTokens(null), NOOP_LOG).tokenScope()).toBeNull()
   })
 
   test("refresh 응답에 refresh_token 이 없으면 기존 값을 유지하고 tmp 파일을 남기지 않는다", async () => {

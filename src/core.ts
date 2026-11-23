@@ -337,7 +337,26 @@ export function delayFor(elapsedMs: number, cfg: Config): number {
 
 // ---------- 인증 (Azure AD device code flow) ----------
 
-type TokenSet = { access_token: string; refresh_token: string; expires_at?: number; expires_in?: number }
+type TokenSet = { access_token: string; refresh_token: string; expires_at?: number; expires_in?: number; scope?: string }
+type TokenError = { error?: string; suberror?: string; error_codes?: unknown; error_description?: string }
+
+// 동의(consent)가 없는 scope 를 refresh 요청에 넣었을 때 Azure AD 가 주는 오류 (AADSTS65001).
+// refresh token 자체는 유효하므로 폐기(revoked)로 보면 안 된다.
+export function isConsentRequired(body: TokenError): boolean {
+  if (body.error !== "invalid_grant") return false
+  return (
+    body.suberror === "consent_required" ||
+    (Array.isArray(body.error_codes) && body.error_codes.includes(65001)) ||
+    /\bAADSTS65001\b/.test(body.error_description ?? "")
+  )
+}
+
+export function withoutTodoScopes(scopes: string): string {
+  return scopes
+    .split(/\s+/)
+    .filter((s) => s && !scopeName(s).startsWith("tasks."))
+    .join(" ")
+}
 
 export type DeviceCode = { verificationUri: string; userCode: string; expiresAt: number }
 
@@ -361,6 +380,8 @@ export class Auth {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private disposed = false
   private revoked = false
+  // To Do scope 에 동의가 없어 refresh 를 To Do scope 없이 하는 중. To Do 도구가 refreshWithTodoScopes() 로 다시 시도한다.
+  private todoConsentMissing = false
 
   constructor(
     private cfg: Config,
@@ -379,6 +400,22 @@ export class Auth {
 
   hasRefreshToken(): boolean {
     return !this.revoked && Boolean(this.load()?.refresh_token)
+  }
+
+  // 저장된 토큰의 scope. 여러 세션이 tokens.json 을 공유하므로 설정이 아니라 파일을 본다. 모르면 null.
+  tokenScope(): string | null {
+    const scope = this.load()?.scope
+    return typeof scope === "string" ? scope : null
+  }
+
+  todoConsentRequired(): boolean {
+    return this.todoConsentMissing
+  }
+
+  // 설정의 scope 전체로 refresh 한다 (다른 세션이 예전 scope 로 토큰을 덮어썼거나 그 사이 관리자 동의가 난 경우).
+  refreshWithTodoScopes(): Promise<string | null> {
+    this.todoConsentMissing = false
+    return this.forceRefresh()
   }
 
   private tokenUrl() {
@@ -475,47 +512,56 @@ export class Auth {
 
   private refresh(t: TokenSet): Promise<string | null> {
     if (this.refreshing) return this.refreshing
-    this.refreshing = (async () => {
-      try {
-        const res = await fetch(this.tokenUrl(), {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "refresh_token",
-            client_id: this.cfg.azure.clientId,
-            refresh_token: t.refresh_token,
-            scope: this.cfg.azure.scopes,
-          }),
-        })
-        const body = (await res.json()) as TokenSet & { error?: string }
-        if (!res.ok) {
-          if (body.error === "invalid_grant") {
-            this.log.warn("token.revoked")
-            if (!this.revoked) {
-              this.revoked = true
-              this.events.onReauthRequired?.()
-            }
-          } else {
-            this.log.error("token.refresh.failed", { error: body.error })
-          }
-          return null
-        }
-        const nt: TokenSet = {
-          ...body,
-          refresh_token: body.refresh_token ?? t.refresh_token,
-          expires_at: Date.now() + (body.expires_in ?? 3600) * 1000,
-        }
-        this.save(nt)
-        this.log.debug("token.refreshed")
-        return nt.access_token
-      } catch (e) {
-        this.log.error("token.refresh.network", { error: String(e) })
-        return null
-      } finally {
-        this.refreshing = null
-      }
-    })()
+    const scopes = this.todoConsentMissing ? withoutTodoScopes(this.cfg.azure.scopes) : this.cfg.azure.scopes
+    this.refreshing = this.requestRefresh(t, scopes).finally(() => {
+      this.refreshing = null
+    })
     return this.refreshing
+  }
+
+  private async requestRefresh(t: TokenSet, scopes: string): Promise<string | null> {
+    try {
+      const res = await fetch(this.tokenUrl(), {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: this.cfg.azure.clientId,
+          refresh_token: t.refresh_token,
+          scope: scopes,
+        }),
+      })
+      const body = (await res.json()) as TokenSet & TokenError
+      if (!res.ok) {
+        // To Do scope 를 설정에 추가했지만 동의가 없으면 Teams 까지 멈추지 않도록 To Do scope 를 빼고 다시 받는다.
+        if (isConsentRequired(body) && todoAccess(scopes) !== "none") {
+          this.log.warn("token.todoConsentRequired", { suberror: body.suberror, errorCodes: body.error_codes })
+          this.todoConsentMissing = true
+          return this.requestRefresh(t, withoutTodoScopes(scopes))
+        }
+        if (body.error === "invalid_grant") {
+          this.log.warn("token.revoked")
+          if (!this.revoked) {
+            this.revoked = true
+            this.events.onReauthRequired?.()
+          }
+        } else {
+          this.log.error("token.refresh.failed", { error: body.error })
+        }
+        return null
+      }
+      const nt: TokenSet = {
+        ...body,
+        refresh_token: body.refresh_token ?? t.refresh_token,
+        expires_at: Date.now() + (body.expires_in ?? 3600) * 1000,
+      }
+      this.save(nt)
+      this.log.debug("token.refreshed")
+      return nt.access_token
+    } catch (e) {
+      this.log.error("token.refresh.network", { error: String(e) })
+      return null
+    }
   }
 
   startDeviceFlow(): void {
@@ -570,6 +616,7 @@ export class Auth {
             this.save({ ...tb, expires_at: Date.now() + (tb.expires_in ?? 3600) * 1000 })
             this.pending = null
             this.revoked = false
+            this.todoConsentMissing = false
             this.scheduleRefreshFromToken(this.load())
             this.log.info("devicecode.login.complete")
             this.events.onLoginComplete?.()
