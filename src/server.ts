@@ -3,7 +3,7 @@
 // Lazy connect: connect / select_chat 도구가 호출되기 전에는 외부 통신을 하지 않는다.
 import * as fs from "node:fs"
 import { MicrosoftTeamsChannel, CHANNEL_INSTRUCTIONS } from "./channel.js"
-import { Auth, configFilePath, Graph, loadConfig, makeLogger, PLUGIN_NAME } from "./core.js"
+import { Auth, configFilePath, Graph, loadConfig, makeLogger, PLUGIN_NAME, todoAccess } from "./core.js"
 import {
   holdAtMost,
   removeRegistry,
@@ -14,6 +14,7 @@ import {
   type RegistryEntry,
 } from "./ipc.js"
 import { McpServer } from "./mcp.js"
+import { todoInstructions, todoTools } from "./todo.js"
 
 function packageVersion(): string {
   try {
@@ -66,14 +67,16 @@ async function main(): Promise<void> {
   })
   channel = ch
 
+  // tools/list 는 시작 시 정해지므로 To Do 노출 여부도 시작 시 설정으로 판단한다 (scope 를 바꾸면 세션 재시작).
+  const todo = todoAccess(cfg.azure.scopes)
   const server = new McpServer({
     name: PLUGIN_NAME,
     version: packageVersion(),
-    instructions: CHANNEL_INSTRUCTIONS,
+    instructions: CHANNEL_INSTRUCTIONS + todoInstructions(todo),
     // 권한·질문 응답은 채널 permission relay 가 아니라 PermissionRequest hook 으로 처리한다
     // (relay 는 AskUserQuestion 답과 always 승인을 실을 수 없고 채널 모드에서만 동작한다).
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    tools: ch.tools(),
+    tools: [...ch.tools(), ...todoTools(todo, { cfg, log, auth, graph, reloadConfig: loadConfig })],
     input: process.stdin,
     output: process.stdout,
     log,

@@ -94,4 +94,37 @@ describe("Node 런타임", () => {
       fs.rmSync(xdg, { recursive: true, force: true })
     }
   })
+
+  test("서버는 시작 시 azure.scopes 의 Tasks 권한으로 To Do 도구 · 지침 노출을 정한다 (Graph 요청 없음)", async () => {
+    const listTools = async (scopes: string) => {
+      const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "ccmt-todo-"))
+      const dir = path.join(xdg, "claudecode-ms-teams")
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, "claudecode-ms-teams.json"), JSON.stringify({ azure: { tenantId: "t", clientId: "c", scopes } }))
+      const server = spawn("node", [path.join(outDir, "server.js")], { env: { ...process.env, XDG_CONFIG_HOME: xdg }, stdio: ["pipe", "pipe", "ignore"] })
+      try {
+        let out = ""
+        server.stdout.on("data", (d) => (out += String(d)))
+        server.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } }) + "\n")
+        server.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) + "\n")
+        const deadline = Date.now() + 5_000
+        while (out.split("\n").filter(Boolean).length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+        const [init, list] = out.split("\n").filter(Boolean).map((l) => JSON.parse(l))
+        return { instructions: init.result.instructions as string, names: (list.result.tools as Array<{ name: string }>).map((t) => t.name) }
+      } finally {
+        server.stdin.end()
+        server.kill()
+        fs.rmSync(xdg, { recursive: true, force: true })
+      }
+    }
+    const teams = ["connect", "select_chat", "status", "disconnect"]
+    const none = await listTools("Chat.Read offline_access")
+    expect(none.names).toEqual(teams)
+    expect(none.instructions).not.toContain("To Do")
+    const read = await listTools("Chat.Read offline_access Tasks.Read")
+    expect(read.names).toEqual([...teams, "todo_list_lists", "todo_list_tasks", "todo_get_task"])
+    const rw = await listTools("Chat.Read offline_access Tasks.ReadWrite")
+    expect(rw.names).toHaveLength(teams.length + 7)
+    expect(rw.instructions).toContain("todo_list_lists")
+  })
 })
