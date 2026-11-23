@@ -40,6 +40,19 @@ export type TodoDeps = {
   reloadConfig?: () => Config
 }
 
+export function describeTodoAccess(access: TodoAccess): string {
+  if (access === "readwrite") return `사용 (${TODO_SCOPE_RW})`
+  return access === "read" ? `읽기 전용 (${TODO_SCOPE_R})` : "미사용 (scope 없음)"
+}
+
+// 저장된 토큰이 To Do 를 쓸 수 있는지. 로그인 상태와 함께 status · doctor 에 표시한다.
+export function describeTodoToken(tokenScope: string | null): string {
+  if (tokenScope == null) return "토큰 scope 알 수 없음"
+  const access = todoAccess(tokenScope)
+  if (access === "none") return "저장된 토큰에 Tasks 권한 없음 — /microsoft-teams:connect 로 다시 로그인(relogin) 필요"
+  return `토큰 권한 ${access === "readwrite" ? TODO_SCOPE_RW : TODO_SCOPE_R}`
+}
+
 export function todoInstructions(access: TodoAccess): string {
   if (access === "none") return ""
   return [

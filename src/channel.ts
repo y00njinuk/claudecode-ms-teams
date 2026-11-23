@@ -28,6 +28,7 @@ import {
   renderOutbound,
   shortSessionId,
   sleep,
+  todoAccess,
   type AnswerValue,
   type Auth,
   type ChatMsg,
@@ -38,8 +39,10 @@ import {
   type Log,
   type Me,
   type ReplyCommand,
+  type TodoAccess,
 } from "./core.js"
 import type { Tool, ToolResult } from "./mcp.js"
+import { describeTodoAccess, describeTodoToken } from "./todo.js"
 
 export const CHAT_LIST_TOP = 10
 // 답장 대기 유효 시간. hooks.json 의 PermissionRequest timeout(초) 과 같게 둔다.
@@ -67,7 +70,14 @@ export const CHANNEL_INSTRUCTIONS = [
 
 export type AuthPort = Pick<
   Auth,
-  "pendingDeviceCode" | "awaitDeviceCode" | "hasRefreshToken" | "startDeviceFlow" | "getAccessToken" | "bootstrap"
+  | "pendingDeviceCode"
+  | "awaitDeviceCode"
+  | "hasRefreshToken"
+  | "startDeviceFlow"
+  | "getAccessToken"
+  | "bootstrap"
+  | "tokenScope"
+  | "todoConsentRequired"
 >
 export type GraphPort = Pick<Graph, "me" | "sendMessage" | "latestMessageId" | "messagesSince" | "listChats">
 
@@ -82,6 +92,8 @@ export type ChannelDeps = {
   // notifications/claude/channel 발신. meta 키는 영문자·숫자·밑줄만 허용된다.
   push: (content: string, meta: Record<string, string>) => void
   onActiveChange?: (active: boolean) => void
+  // 서버 시작 시 노출한 To Do 도구 범위 (status 표시용).
+  todoAccess?: TodoAccess
   sessionId?: string
   now?: () => number
 }
@@ -428,9 +440,22 @@ export class MicrosoftTeamsChannel {
       `폴링 간격: ${this.chat ? `${delayFor(this.now() - this.lastActivity, this.d.cfg)}ms` : "-"}`,
       `Teams 응답 대기: 권한 요청 ${this.pendingPermissions.size}건 · 질문 ${this.pendingQuestions.size}건`,
       `자동 승인 도구: ${[...this.autoAllowTools].join(", ") || "-"}`,
+      this.todoStatus(),
       `Teams 요청을 세션으로 받으려면 채널 모드로 실행: ${CHANNEL_LAUNCH_COMMAND}`,
     ]
     return { text: lines.join("\n") }
+  }
+
+  // 도구 노출은 시작 시 설정으로 정해지므로 지금 설정과 다르면 재시작이 필요하다고 알린다.
+  private todoStatus(): string {
+    const started = this.d.todoAccess ?? "none"
+    const configured = todoAccess(this.d.cfg.azure.scopes)
+    let line = `To Do: ${describeTodoAccess(started)}`
+    if (configured !== started) line += ` — 설정은 ${describeTodoAccess(configured)}, 세션을 다시 시작해야 적용`
+    if (started === "none") return line
+    if (!this.d.auth.hasRefreshToken()) return `${line} · 로그인 필요`
+    if (this.d.auth.todoConsentRequired()) return `${line} · Tasks 권한 동의 필요 (관리자 동의 확인 후 /microsoft-teams:connect 로 다시 로그인)`
+    return `${line} · ${describeTodoToken(this.d.auth.tokenScope())}`
   }
 
   disconnect(): ToolResult {

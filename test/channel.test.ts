@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { MicrosoftTeamsChannel, type AuthPort, type GraphPort, type HookDecision } from "../src/channel"
-import { defaultConfig, isInsideWorkspace, mergeConfig, NOOP_LOG, type ChatMsg, type Config, type DeviceCode } from "../src/core"
+import { defaultConfig, isInsideWorkspace, mergeConfig, NOOP_LOG, type ChatMsg, type Config, type DeviceCode, type TodoAccess } from "../src/core"
 import { sendToChat } from "../src/send"
 
 const CHAT_ID = "19:abc123@thread.v2"
@@ -15,7 +15,7 @@ function configured(extra: object = {}): Config {
   })
 }
 
-function setup(opts: { cfg?: Config; hasToken?: boolean; seed?: number | null } = {}) {
+function setup(opts: { cfg?: Config; hasToken?: boolean; seed?: number | null; todoAccess?: TodoAccess; tokenScope?: string | null; consent?: boolean } = {}) {
   let hasToken = opts.hasToken ?? true
   let device: DeviceCode | null = null
   let deviceFlowStarted = 0
@@ -39,6 +39,8 @@ function setup(opts: { cfg?: Config; hasToken?: boolean; seed?: number | null } 
     },
     getAccessToken: async () => (hasToken ? "token" : null),
     bootstrap: () => {},
+    tokenScope: () => (opts.tokenScope === undefined ? "Chat.Read" : opts.tokenScope),
+    todoConsentRequired: () => opts.consent ?? false,
   }
   const graph: GraphPort = {
     me: async () => me,
@@ -64,6 +66,7 @@ function setup(opts: { cfg?: Config; hasToken?: boolean; seed?: number | null } 
     sessionId: "abcdef1234567890",
     push: (content, meta) => pushes.push({ content, meta }),
     onActiveChange: (a) => activeChanges.push(a),
+    todoAccess: opts.todoAccess,
     now: () => clock,
   })
   const receive = (text: string, from = ME.id, id = String(++idSeq)) => {
@@ -231,6 +234,30 @@ describe("connect / select_chat", () => {
     s.channel.disconnect()
     expect(s.channel.active).toBe(false)
     expect(s.activeChanges).toEqual([true, false])
+  })
+})
+
+describe("status 의 To Do 표시", () => {
+  const todoLine = (s: ReturnType<typeof setup>) => s.channel.status().text.split("\n").find((l) => l.startsWith("To Do:"))
+  const withTasks = configured({ azure: { tenantId: "t", clientId: "c", scopes: "Chat.Read Tasks.ReadWrite" } })
+
+  test("scope 가 없으면 미사용만 표시한다", () => {
+    expect(todoLine(setup())).toBe("To Do: 미사용 (scope 없음)")
+  })
+
+  test("사용 중이면 토큰의 Tasks 권한을 함께 보여준다", () => {
+    expect(todoLine(setup({ cfg: withTasks, todoAccess: "readwrite", tokenScope: "Chat.Read Tasks.ReadWrite" }))).toBe(
+      "To Do: 사용 (Tasks.ReadWrite) · 토큰 권한 Tasks.ReadWrite",
+    )
+    expect(todoLine(setup({ cfg: withTasks, todoAccess: "readwrite", tokenScope: "Chat.Read" }))).toContain("Tasks 권한 없음")
+    expect(todoLine(setup({ cfg: withTasks, todoAccess: "readwrite", consent: true }))).toContain("동의 필요")
+    expect(todoLine(setup({ cfg: withTasks, todoAccess: "readwrite", hasToken: false }))).toContain("로그인 필요")
+  })
+
+  test("시작 후 설정이 바뀌었으면 세션 재시작이 필요하다고 알린다", () => {
+    expect(todoLine(setup({ cfg: withTasks }))).toBe("To Do: 미사용 (scope 없음) — 설정은 사용 (Tasks.ReadWrite), 세션을 다시 시작해야 적용")
+    const read = configured({ azure: { tenantId: "t", clientId: "c", scopes: "Tasks.Read" } })
+    expect(todoLine(setup({ cfg: read, todoAccess: "read", tokenScope: "Tasks.Read" }))).toBe("To Do: 읽기 전용 (Tasks.Read) · 토큰 권한 Tasks.Read")
   })
 })
 

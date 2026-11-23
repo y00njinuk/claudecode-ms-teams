@@ -53,6 +53,8 @@ async function main(): Promise<void> {
   }
 
   // channel 과 mcp 가 서로를 참조하므로 notify 는 mcp 생성 이후에만 호출되는 closure 로 넘긴다.
+  // tools/list 는 시작 시 정해지므로 To Do 노출 여부도 시작 시 설정으로 판단한다 (scope 를 바꾸면 세션 재시작).
+  const todo = todoAccess(cfg.azure.scopes)
   let mcp: McpServer | null = null
   const ch = new MicrosoftTeamsChannel({
     cfg,
@@ -64,11 +66,10 @@ async function main(): Promise<void> {
     sessionId: process.env.CLAUDE_CODE_SESSION_ID,
     push: (content, meta) => mcp?.notify("notifications/claude/channel", { content, meta }),
     onActiveChange: setActive,
+    todoAccess: todo,
   })
   channel = ch
 
-  // tools/list 는 시작 시 정해지므로 To Do 노출 여부도 시작 시 설정으로 판단한다 (scope 를 바꾸면 세션 재시작).
-  const todo = todoAccess(cfg.azure.scopes)
   const server = new McpServer({
     name: PLUGIN_NAME,
     version: packageVersion(),
