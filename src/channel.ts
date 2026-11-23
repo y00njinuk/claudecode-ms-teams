@@ -291,9 +291,15 @@ export class MicrosoftTeamsChannel {
       {
         name: "connect",
         description:
-          "Microsoft Teams 연동을 시작한다. 로그인이 필요하면 device code 안내를, 로그인되어 있으면 최근 채팅방 목록을 반환한다.",
-        inputSchema: { type: "object", properties: {} },
-        handler: () => this.connect(),
+          "Microsoft Teams 연동을 시작한다. 로그인이 필요하면 device code 안내를, 로그인되어 있으면 최근 채팅방 목록을 반환한다. " +
+          "relogin=true 면 로그인되어 있어도 새로 로그인한다 (azure.scopes 를 바꾼 뒤 · 사용자가 터미널에서 재로그인을 요청할 때만).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            relogin: { type: "boolean", description: "true 면 저장된 로그인이 있어도 device code 로그인을 새로 시작한다. 새 로그인이 끝날 때까지 기존 로그인을 계속 쓴다." },
+          },
+        },
+        handler: (args) => this.connect({ relogin: args.relogin === true }),
       },
       {
         name: "select_chat",
@@ -323,7 +329,7 @@ export class MicrosoftTeamsChannel {
 
   // ---------- 도구 ----------
 
-  async connect(): Promise<ToolResult> {
+  async connect(opts: { relogin?: boolean } = {}): Promise<ToolResult> {
     // Auth 가 같은 cfg 객체를 참조하므로 교체가 아니라 in-place 갱신한다.
     if (this.d.reloadConfig) Object.assign(this.d.cfg, this.d.reloadConfig())
     if (!azureConfigured(this.d.cfg)) {
@@ -337,6 +343,11 @@ export class MicrosoftTeamsChannel {
     this.connectRequested = true
     this.d.auth.bootstrap()
     if (!this.d.auth.hasRefreshToken()) return this.beginLogin()
+    if (opts.relogin) {
+      // 로그인 완료 후 계정이 바뀌었는지 비교할 기준을 먼저 잡아 둔다 (onLoginComplete).
+      await this.ensureMe()
+      return this.beginLogin(true)
+    }
     const token = await this.d.auth.getAccessToken()
     if (!token) return this.beginLogin()
     await this.ensureMe()
@@ -346,7 +357,8 @@ export class MicrosoftTeamsChannel {
     return { text: this.renderChatList(chats) }
   }
 
-  private async beginLogin(): Promise<ToolResult> {
+  // 저장된 토큰은 device flow 로그인이 성공해 새 토큰을 저장할 때까지 그대로 쓴다 (relogin 중에도 Teams 계속 동작).
+  private async beginLogin(relogin = false): Promise<ToolResult> {
     if (!this.d.auth.pendingDeviceCode()) {
       this.d.auth.startDeviceFlow()
       await Promise.race([this.d.auth.awaitDeviceCode(), sleep(DEVICE_CODE_WAIT_MS)])
@@ -355,7 +367,7 @@ export class MicrosoftTeamsChannel {
     if (!dc) {
       return { isError: true, text: "Microsoft Teams 로그인 준비에 실패했습니다. tenantId/clientId 설정과 네트워크를 확인하세요." }
     }
-    return { text: this.renderLoginNotice(dc) }
+    return { text: this.renderLoginNotice(dc, relogin) }
   }
 
   async selectChat(arg: string): Promise<ToolResult> {
@@ -911,9 +923,9 @@ export class MicrosoftTeamsChannel {
     return shortSessionId(this.lastSessionId)
   }
 
-  private renderLoginNotice(dc: DeviceCode): string {
+  private renderLoginNotice(dc: DeviceCode, relogin = false): string {
     return [
-      "🔐 Microsoft Teams 로그인 필요",
+      relogin ? "🔐 Microsoft Teams 다시 로그인 (새 로그인이 끝날 때까지 기존 로그인을 계속 사용합니다)" : "🔐 Microsoft Teams 로그인 필요",
       `1. 브라우저에서 ${dc.verificationUri} 를 엽니다.`,
       `2. 코드 ${dc.userCode} 를 입력합니다.`,
       "3. 회사 계정으로 로그인합니다. 완료되면 채팅방 목록이 이어서 표시됩니다 (채널 모드가 아니면 connect 를 다시 호출).",

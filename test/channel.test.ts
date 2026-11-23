@@ -160,6 +160,38 @@ describe("connect / select_chat", () => {
     expect(s.activeChanges).toEqual([true, false])
   })
 
+  test("connect({ relogin: true }) 는 토큰이 있어도 device flow 를 시작하고 기존 연동 · 발신을 유지한다", async () => {
+    const s = await connected()
+    const r = await s.channel.connect({ relogin: true })
+    expect(s.deviceFlowStarted).toBe(1)
+    expect(r.text).toContain("ABCD-1234")
+    expect(r.text).toContain("기존 로그인을 계속 사용")
+    expect(s.channel.active).toBe(true)
+    // 로그인 진행 중에도 Stop 발신은 계속되고 코드는 가린다.
+    await s.channel.handleStop({ session_id: "abcdef1234567890", cwd: "/w/proj", text: "코드는 ABCD-1234" })
+    expect(s.sent.at(-1)?.html).toContain("[로그인 코드 숨김]")
+    expect(s.sent.at(-1)?.html).not.toContain("ABCD-1234")
+  })
+
+  test("relogin 으로 다른 계정이 로그인하면 연동을 해제한다", async () => {
+    const s = await connected()
+    await s.channel.connect({ relogin: true })
+    s.setMe({ id: "intruder", displayName: "동료" })
+    await s.channel.onLoginComplete()
+    expect(s.channel.active).toBe(false)
+    expect(s.pushes.at(-1)?.content).toContain("다른 계정(동료)")
+  })
+
+  test("connect 도구는 relogin 인자를 boolean true 일 때만 적용한다", async () => {
+    const s = setup()
+    const tool = s.channel.tools().find((t) => t.name === "connect")!
+    expect(Object.keys((tool.inputSchema as { properties: object }).properties)).toEqual(["relogin"])
+    await tool.handler({ relogin: "true" })
+    expect(s.deviceFlowStarted).toBe(0)
+    await tool.handler({ relogin: true })
+    expect(s.deviceFlowStarted).toBe(1)
+  })
+
   test("토큰이 있으면 목록을 반환하고 번호로 채팅방을 고른다", async () => {
     const s = setup()
     const list = await s.channel.connect()
