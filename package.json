@@ -1,7 +1,7 @@
 {
   "name": "claudecode-ms-teams",
-  "version": "0.4.0",
-  "description": "Claude Code ↔ Microsoft Teams 양방향 채널 플러그인. 턴이 끝나면 응답을 Teams 채팅으로 보내고, 연동한 Teams 채팅방의 메시지를 세션에 주입하며, 권한 요청과 질문(AskUserQuestion)에 Teams 답장으로 응답한다.",
+  "version": "0.5.0",
+  "description": "Claude Code ↔ Microsoft Teams 양방향 채널 플러그인. 턴이 끝나면 응답을 Teams 채팅으로 보내고, 연동한 Teams 채팅방의 메시지를 세션에 주입하며, 권한 요청과 질문(AskUserQuestion)에 Teams 답장으로 응답한다. 선택 기능으로 같은 로그인에서 Microsoft To Do 도구를 제공한다.",
   "keywords": [
     "claude-code",
     "claude-code-plugin",
@@ -10,6 +10,7 @@
     "microsoft-teams",
     "msteams",
     "microsoft-graph",
+    "microsoft-todo",
     "chatops",
     "remote-control",
     "notification"
