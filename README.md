@@ -8,6 +8,7 @@ Claude Code ↔ Microsoft Teams 양방향 채널 플러그인.
   (`#allow` · `#allow-always` · `#reject` · 답 그대로 · `#skip`). `#allow-always` 한 번이면 그 도구는 세션이 끝날 때까지 다시 묻지 않는다.
   터미널 다이얼로그도 그대로 떠 있어 먼저 한 응답이 적용된다.
 - `claudecode-ms-teams send` 로 세션 없이 스크립트(예약 작업 보고 등)에서 Teams 로 보내고 결과를 종료 코드로 받는다.
+- (선택) 같은 로그인으로 **Microsoft To Do** 의 목록 · task · checklist 를 조회 · 생성 · 수정한다 (`todo_*` 도구, `Tasks.ReadWrite` scope 를 넣었을 때만).
 
 Microsoft Graph **delegated 권한 + 폴링** 방식이라 Azure Bot, 공개 HTTPS 엔드포인트(터널), Teams 앱 업로드가 필요 없다.
 메시지는 봇이 아니라 로그인한 본인 계정으로 올라간다.
@@ -22,6 +23,7 @@ Microsoft Graph **delegated 권한 + 폴링** 방식이라 Azure Bot, 공개 HTT
 | 조직 설정 | Team/Enterprise 플랜에서 채널을 쓰려면 관리자가 managed settings 의 `channelsEnabled` 를 켜야 한다 |
 | Node.js | 20 이상 |
 | Azure AD 앱 | delegated scope: `Chat.Create Chat.Read Chat.ReadBasic Chat.ReadWrite ChatMessage.Read ChatMessage.Send offline_access User.Read` |
+| Azure AD 앱 (선택: Microsoft To Do) | delegated `Tasks.ReadWrite` (조회만 쓰면 `Tasks.Read`). 조직에 따라 관리자 동의가 필요하다 |
 
 Azure AD 앱 등록/권한 신청은 조직의 Azure 관리자 안내를 따른다. opencode-ms-teams 에서 쓰던 앱(tenantId/clientId/scopes)을 그대로 써도 된다.
 
@@ -214,6 +216,49 @@ claudecode-ms-teams send --chat "19:...@thread.v2" --title claude-nightly --file
 - chatId 는 `/microsoft-teams:connect` 목록에 나온 `19:...` 값이다. 메시지는 `[<제목> · -]` 헤더로 시작해 같은 채팅방에 연동된 세션에는 전달되지 않는다.
 - 본문이 Teams 메시지 크기(약 25KB HTML)를 넘으면 뒷부분을 자르고 알린다.
 
+### 7. Microsoft To Do (선택)
+
+같은 Microsoft 로그인으로 To Do 를 쓴다. 별도 앱 · 로그인은 필요 없다. 쓰지 않으면 아무것도 바뀌지 않는다 (도구도 노출하지 않는다).
+
+1. Azure AD 앱에 delegated `Tasks.ReadWrite` 권한을 추가한다 (조직 정책에 따라 관리자 동의).
+2. 설정의 `azure.scopes` 끝에 `Tasks.ReadWrite` 를 추가한다 (조회만 하려면 `Tasks.Read`).
+3. **Claude Code 세션을 다시 시작한다.** 도구 목록은 세션 시작 시 정해진다.
+4. 이미 로그인해 있었다면 터미널에서 "Teams 다시 로그인해줘" 처럼 요청해 `/microsoft-teams:connect` 를 `relogin` 으로 실행한다.
+   새 로그인이 끝날 때까지 기존 로그인으로 Teams 는 계속 동작한다. 관리자 동의가 이미 있으면 재로그인 없이 바로 쓰일 수도 있다.
+
+| `azure.scopes` | 도구 |
+|---|---|
+| `Tasks.ReadWrite` | `todo_list_lists` · `todo_list_tasks` · `todo_get_task` · `todo_create_task` · `todo_update_task` · `todo_delete_task` · `todo_checklist` |
+| `Tasks.Read` 만 | 조회 3개 (`todo_list_lists` · `todo_list_tasks` · `todo_get_task`) |
+| 없음 | 없음 (Teams 기능만) |
+
+세션에서 자연어로 요청하면 된다.
+
+```
+To Do 목록 보여줘
+"업무" 목록에 내일까지 "주간 보고서 작성" 추가하고 체크리스트로 초안 · 검토 넣어줘
+보고서 task 금요일 오후 3시에 알림 걸어줘
+보고서 완료 처리해줘
+```
+
+- 목록은 id 또는 이름으로 지정한다. 생략하면 기본 목록(To Do 의 "작업" / "Tasks")을 쓴다. 이름이 같은 목록이 여럿이면 id 로 지정하라고 안내한다.
+- 기한은 날짜(`YYYY-MM-DD`), 알림은 `YYYY-MM-DDTHH:mm` (시각 생략 시 09:00) 으로 해석한다. 빈 값으로 수정하면 해제한다.
+  시간대는 설정의 `todo.timeZone`, 비어 있으면 시스템 시간대(예: `Asia/Seoul`)다. 조회 결과의 시각도 이 시간대로 보여준다.
+- 삭제(`todo_delete_task`)는 복구할 수 없다. Claude 는 삭제 전에 확인을 받도록 안내받는다.
+- `status` 도구가 To Do 사용 상태와 저장된 토큰의 Tasks 권한을 보여준다.
+
+```
+To Do: 사용 (Tasks.ReadWrite) · 토큰 권한 Tasks.ReadWrite
+```
+
+| 안내 | 원인 · 조치 |
+|---|---|
+| `저장된 로그인 토큰에 Tasks.ReadWrite 권한이 없습니다` | scope 추가 전에 로그인했거나 다른 세션이 예전 설정으로 토큰을 갱신했다. 터미널에서 `/microsoft-teams:connect` 로 다시 로그인(relogin) |
+| `Microsoft To Do 권한(Tasks) 동의가 필요합니다` | Azure 앱에 Tasks 권한 · 관리자 동의가 없다. 이때도 Teams 기능은 계속 동작한다 (To Do scope 를 빼고 토큰을 갱신) |
+| `HTTP 403` | Tasks 권한 없음. `azure.scopes` 와 Azure 앱 권한 확인 후 재로그인 |
+| `HTTP 404` | 목록 · task · checklist id 가 틀렸다 |
+| `HTTP 400 … todo.timeZone` | 시간대를 Graph 가 받지 않으면 `todo.timeZone` 을 Windows 시간대 이름(예: `Korea Standard Time`)으로 바꾼다 |
+
 ### 보안
 
 - 세션을 조작할 수 있는 사람은 **로그인한 본인**뿐이다. 동료에게 허용하려면 `access.allowedUserIds` 에 Entra 사용자 ID 를 넣는다.
@@ -232,7 +277,8 @@ claudecode-ms-teams send --chat "19:...@thread.v2" --title claude-nightly --file
   "polling": { "intervalMs": 5000, "backoff1Ms": 600000, "backoff2Ms": 3600000 },
   "access": { "allowedUserIds": [] },
   "log": { "file": "~/.config/claudecode-ms-teams/claudecode-ms-teams.log", "enabled": false },
-  "tokens": { "file": "~/.config/claudecode-ms-teams/tokens.json" }
+  "tokens": { "file": "~/.config/claudecode-ms-teams/tokens.json" },
+  "todo": { "timeZone": "" }
 }
 ```
 
@@ -243,6 +289,7 @@ claudecode-ms-teams send --chat "19:...@thread.v2" --title claude-nightly --file
 | `access.allowedUserIds` | 본인 외에 세션 요청과 답장 명령을 보낼 수 있는 Entra 사용자 ID |
 | `log` | `enabled=false` (기본) 면 로그 파일을 만들지 않는다. `true` 면 세션 시작 시 비우고 기록한다 |
 | `tokens` | 토큰 파일 경로 |
+| `todo.timeZone` | Microsoft To Do 기한 · 알림을 해석하는 시간대 (IANA 예: `Asia/Seoul`, 또는 Windows 이름). 비어 있으면 시스템 시간대 |
 
 `XDG_CONFIG_HOME` 이 설정돼 있으면 `~/.config` 대신 그 경로를 쓴다.
 사내망 프록시 인증서 오류가 나면 `NODE_EXTRA_CA_CERTS=<사내 CA 번들>` 을 설정한 뒤 Claude Code 를 다시 시작한다.
@@ -252,7 +299,7 @@ claudecode-ms-teams send --chat "19:...@thread.v2" --title claude-nightly --file
 ```
 claudecode-ms-teams install             Claude Code 에 플러그인 등록 (업그레이드 후에는 버전 기록 갱신)
 claudecode-ms-teams uninstall [--purge] 등록 해제 (--purge: 설정·토큰도 삭제)
-claudecode-ms-teams doctor              설치 상태 진단
+claudecode-ms-teams doctor              설치 상태 진단 (Microsoft To Do 설정 · 토큰 권한 포함)
 claudecode-ms-teams send --chat <19:...> [--file <경로>] [--title <제목>]
                                         세션 없이 채팅방으로 한 건 발신 (종료 코드 0 · 1 · 2 · 3)
 ```

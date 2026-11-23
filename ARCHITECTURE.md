@@ -35,6 +35,7 @@ Claude Code 의 세 가지 확장점(채널 MCP 서버 · command hook · skill)
 | `src/hook.ts` | command hook 클라이언트. 항상 exit 0, stdout 은 PermissionRequest 결정에만 쓴다 |
 | `src/install.ts` · `src/cli.ts` · `postinstall.mjs` | 로컬 마켓플레이스 등록 · 플러그인 설치 · 진단 |
 | `src/send.ts` | 세션 없이 Teams 채팅방으로 한 건 보내는 `send` CLI (예약 작업 보고용) |
+| `src/todo.ts` | 선택 기능 Microsoft To Do 도구 (`todo_*`) · 날짜 변환 · 목록 해석 · Graph 오류 안내 |
 | `.claude-plugin/plugin.json` | 플러그인 매니페스트 (`mcpServers` 인라인) |
 | `.claude-plugin/marketplace.json` | 패키지 루트 자체를 마켓플레이스로 노출 (`source: "./"`) |
 | `hooks/hooks.json` | `Stop` · `StopFailure` → `hook.js stop`, `SubagentStop` → `hook.js subagent-stop`, `PermissionRequest(*)` → `hook.js permission`, `PostToolUse(AskUserQuestion)` → `hook.js answered` |
@@ -69,7 +70,7 @@ Claude Code 는 stdio MCP 서버와 command hook 을 모두 `claude` 프로세�
 
 ## Lazy connect
 
-플러그인을 설치하면 모든 세션에서 MCP 서버가 뜨지만, `connect` / `select_chat` 도구가 호출되기 전에는
+플러그인을 설치하면 모든 세션에서 MCP 서버가 뜨지만, `connect` / `select_chat` / `todo_*` 도구가 호출되기 전에는
 Azure · Graph 로 어떤 요청도 보내지 않는다. 인증 이벤트(재로그인 안내, 로그인 완료)도 connect 이후에만 채널로 보낸다.
 `send` CLI 는 사용자가 직접 실행하는 별도 프로세스라 이 규칙의 대상이 아니다.
 
@@ -84,10 +85,15 @@ device code 는 그 코드를 먼저 입력한 사람의 계정으로 로그인�
 - device flow 진행 중에는 Stop 발신 텍스트와 권한·질문 알림에서 user code 를 `[로그인 코드 숨김]` 으로 가린다.
 - device flow 로그인이 끝나면 `/me` 를 다시 조회한다. 기존 계정과 id 가 다르면 연동을 해제하고 발신자 게이트를 비운다.
 - `tokens.json` 은 여러 세션의 서버가 공유하므로 tmp + rename 으로 원자적으로 쓴다. refresh 응답에 `refresh_token` 이 없으면 기존 값을 유지한다.
+- `connect` 의 `relogin: true` 는 저장된 로그인이 있어도 device flow 를 시작한다. 새 토큰이 저장될 때까지 기존 토큰을 그대로 쓰므로 Teams 는 계속 동작하고,
+  시작 전에 `/me` 를 확인해 두어 로그인 후 계정이 바뀌었으면 위와 같이 연동을 해제한다 (확인에 실패하면 relogin 을 시작하지 않는다). 코드 가림도 같다.
+  skill 은 터미널 사용자가 요청할 때만 relogin 하도록 안내한다 (Teams 메시지만으로는 하지 않는다).
 
 ## 장애 격리
 
 - `Graph.call()` 은 JSON 이 아닌 본문(프록시·캡티브 포털 HTML, 본문 중간 끊김)을 `null` 로 흡수한다.
+  원인이 필요한 To Do 도구는 같은 재시도 규칙(401 → refresh 후 1회, 429 → `Retry-After` 후 1회)을 쓰는 `Graph.request()` 로
+  `{ ok, status, body, error }` (`auth` · `network` · `ssl` · `badBody` · `http`) 를 받는다. `call()` 은 그 결과를 `null` 로 축약할 뿐이다.
 - `server.ts` 의 fire-and-forget 호출은 모두 `.catch` 로 감싸고, `unhandledRejection` 은 로그만 남긴다. 그러지 않으면 한 번의 실패로 세션 내내 MCP 서버가 사라진다.
 - `pollOnce` 는 메시지 단위로 예외를 격리한다. 커서가 이미 배치 끝으로 전진했으므로 하나의 실패가 나머지 메시지를 잃게 해서는 안 된다.
 
@@ -251,6 +257,70 @@ Claude Code 는 터미널에서 먼저 응답했다는 사실을 알려주지 �
 
 `PreToolUse` 의 `permissionDecision: "allow"` + `updatedInput.answers` 도 문서화된 방법이지만 (hooks 문서), PreToolUse 는 다이얼로그가
 뜨기 전에 끝나야 하므로 기다리는 동안 터미널에서 답할 수 없게 된다.
+
+## Microsoft To Do (선택 기능)
+
+같은 `Auth` · `Graph` · `tokens.json` 으로 To Do 를 다룬다. 로그인 한 번으로 Teams 와 함께 쓴다.
+
+### 기능 게이트
+
+MCP `tools/list` 는 서버 시작 시 정한 배열을 그대로 돌려주므로, 노출 여부도 **서버 시작 시 설정**(`azure.scopes`)으로 정한다 (`todoAccess()`).
+
+| `azure.scopes` | 도구 | instructions |
+|---|---|---|
+| `Tasks.ReadWrite` | 7개 (`todo_list_lists` · `todo_list_tasks` · `todo_get_task` · `todo_create_task` · `todo_update_task` · `todo_delete_task` · `todo_checklist`) | To Do 지침 추가 (삭제는 확인 후) |
+| `Tasks.Read` 만 | 조회 3개 | 조회만 가능 |
+| 없음 | 없음 — 0.4.0 과 같은 `tools/list` · instructions | — |
+
+scope 를 바꾸면 세션을 다시 시작해야 한다. `status` 는 시작 시 범위와 지금 설정이 다르면 재시작이 필요하다고 알린다.
+예외로 `connect` 의 `relogin` 인자(scope 추가 후 재로그인 경로)는 To Do 설정과 무관하게 항상 있다. 그 외 Teams 도구 · instructions 는 0.4.0 과 같다.
+`REQUIRED_SCOPES` (Teams 필수) 는 바꾸지 않는다. scope 비교는 대소문자와 `https://graph.microsoft.com/` 접두를 무시한다.
+
+### 날짜 · 시간대
+
+- 입력: `dueDate` = `YYYY-MM-DD`, `reminder` = `YYYY-MM-DDTHH:mm` (시각 생략 시 09:00), 빈 문자열 = 해제 (`reminderDateTime: null` + `isReminderOn: false`).
+- 보낼 때는 `{ dateTime: <현지 시각>, timeZone: todo.timeZone }` 그대로 보낸다. 설정이 비어 있으면 시스템 IANA 시간대 (`Intl`).
+  UTC 로 바꿔 보내지 않는 이유: To Do 는 기한(`dueDateTime`)을 날짜로만 쓰고 보낸 시간대 기준 날짜를 그대로 남긴다는 사례가 있다
+  (Microsoft Q&A 1237380, 사용자 보고). UTC 로 바꾸면 UTC 보다 늦은 시간대에서 날짜가 하루 당겨진다.
+- 응답은 UTC 로 온다. `todo.timeZone` 의 현지 시각으로 바꿔 보여준다 (기한은 날짜만). Windows 이름이면 변환 표가 없으므로 시스템 IANA 시간대로 바꾼다
+  (UTC 그대로 날짜만 자르면 UTC 보다 이른 시간대에서 기한이 하루 이르게 보인다).
+- Graph `dateTimeTimeZone` 문서는 Windows 시간대와 추가 시간대 목록(`Asia/Seoul` 포함)을 받는다고 적지만, 생성 · 수정 메서드가 모두 지원하지는 않을 수 있다고 한다.
+  400 이 나면 `todo.timeZone` 을 Windows 이름으로 바꾸라고 안내한다.
+
+### 토큰 scope 불일치
+
+여러 세션이 `tokens.json` 을 공유하므로, scope 를 추가하기 전에 시작한 세션(또는 구버전)이 refresh 하면 Tasks 권한이 빠진 토큰이 저장될 수 있다.
+To Do 도구는 호출할 때마다 저장된 토큰의 `scope` 를 본다 (`Auth.tokenScope()`). 필요한 권한이 없으면
+
+1. 설정을 다시 읽어 `cfg` 를 in-place 갱신하고 (설정에 Tasks scope 가 없으면 세션 재시작 안내),
+2. `Auth.refreshWithTodoScopes()` 로 전체 scope refresh 를 한 번 시도한 뒤,
+3. 그래도 없으면 재로그인(`connect` relogin) 을 안내한다. 토큰 `scope` 를 모르면(필드 없음) 그대로 Graph 응답에 맡긴다.
+
+### 동의 없는 scope 로 refresh
+
+설정에 `Tasks.*` 를 넣었지만 Azure 앱에 동의가 없으면 refresh 가 `invalid_grant` + `suberror: consent_required` (`AADSTS65001`) 로 거절된다고 알려져 있다
+(Microsoft Q&A 사례, 실측 아님 — `test/fixtures/aad-consent-required.json`). 허용되지 않은 scope 는 `70000` 으로 올 수도 있다.
+기존 처리대로면 `revoked` 가 되어 Teams 까지 멈춘다.
+
+- 요청 scope 에 `Tasks.*` 가 있으면 오류 코드와 무관하게 `invalid_grant` 를 `revoked` 로 두지 않고 `Tasks.*` 를 뺀 scope 로 한 번 더 refresh 한다.
+  그것도 `invalid_grant` 면 그때 폐기로 본다 (refresh token 자체가 폐기된 경우). 이후 refresh 는 Tasks 없이 한다 (`todoConsentMissing`).
+- To Do 도구 호출 시 `refreshWithTodoScopes()` 가 진행 중인 refresh 가 끝나기를 기다린 뒤 전체 scope 로 다시 시도하고,
+  여전히 거절되면 "Tasks 권한 동의 필요", 갱신 자체가 실패하면(네트워크) 재시도를 안내한다.
+- device flow 로그인이 성공하면 플래그를 지운다. `Tasks.*` 를 요청하지 않은 `invalid_grant` 는 기존처럼 `revoked` 로 처리한다.
+
+### Graph 호출과 오류 안내
+
+- 모든 path segment(목록 · task · checklist id) 는 `encodeURIComponent`. OData 질의는 `%24top` · `%24orderby` · `%24filter` 로 쓴다.
+- 목록 · task 조회는 `@odata.nextLink` 를 최대 10페이지, 요청한 `top` 까지 따라간다. nextLink 가 `https://graph.microsoft.com/` 이 아니면 따르지 않는다 (토큰 유출 방지).
+- 목록 인자는 id 또는 표시 이름. 생략하면 `wellknownListName == "defaultList"` (표시 이름은 로캘마다 다르다). 같은 이름이 여럿이면 id 로 지정하라고 안내한다.
+- `todo_create_task` 의 checklist 는 task 를 만든 뒤 `POST …/checklistItems` 로 하나씩 만든다 (생성 본문에 함께 넣는 방식은 확인하지 못했다). 중간에 실패하면 만든 task id 와 추가된 개수를 알린다.
+- 실패는 `{ text, isError: true }` 로 조치를 함께 돌려준다: 토큰 없음 → `/microsoft-teams:connect`, 403 → Tasks 권한 · 재로그인, 404 → id 확인,
+  400 → Graph `error.message` + 입력 형식 (날짜가 있으면 시간대 안내), 429 · 5xx → 재시도, 네트워크 · 인증서 · 본문 오류 → 기존 SSL 힌트와 같은 문구.
+
+### 실측하지 않은 항목
+
+생성 · 수정 · 삭제 · checklist 호출, `Asia/Seoul`(IANA) `timeZone` 수용 여부, 동의 없는 scope 의 refresh 오류 형태, 기존 refresh token 으로 새 scope 를 받을 수 있는지,
+`flaggedEmails` 목록 쓰기 거부 형태, `$top` 상한은 단위 테스트(fetch mock)로만 확인했다. 실환경에서 확인하면 이 절을 갱신한다.
 
 ## 설치 메커니즘
 

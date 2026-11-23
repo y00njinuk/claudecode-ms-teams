@@ -20,6 +20,7 @@ claudecode-ms-teams/
 │   ├── hook.ts              ← command hook 클라이언트
 │   ├── install.ts · cli.ts  ← 설치/제거/진단
 │   ├── send.ts              ← 세션 없는 발신 CLI (`claudecode-ms-teams send`)
+│   ├── todo.ts              ← 선택 기능 Microsoft To Do 도구 (`todo_*`)
 ├── postinstall.mjs          ← 글로벌 설치 시 자동 등록
 ├── test/                    ← bun test
 └── dist/                    ← tsc 산출물 (.gitignore, npm tarball 포함)
@@ -28,8 +29,8 @@ claudecode-ms-teams/
 ## 핵심 불변식
 
 1. **런타임 의존성 제로**: Node 내장 `fetch` · `http` · `node:` 빌트인만 쓴다. MCP SDK 도 쓰지 않는다 (플러그인이 npm 설치 경로에서 제자리 로드되므로 의존성 설치 단계가 없다).
-2. **stdout 은 MCP 전용**: `server.ts` / `channel.ts` / `core.ts` 에서 `console.log` 금지. 진단은 `log` (파일) 로만. `hook.ts` 는 `permission` 이벤트에서 Teams 답장으로 정해진 결정 JSON 만 stdout 에 쓰고, 그 외에는 아무것도 쓰지 않으며 항상 exit 0 으로 끝낸다.
-3. **Lazy connect**: `connect` / `select_chat` 도구 호출 전에는 Azure · Graph 요청을 보내지 않는다. 인증 이벤트의 채널 push 도 `connectRequested` 이후에만. (`send` CLI 는 사용자가 직접 실행하는 별도 프로세스다.)
+2. **stdout 은 MCP 전용**: `server.ts` / `channel.ts` / `core.ts` / `todo.ts` 에서 `console.log` 금지. 진단은 `log` (파일) 로만. `hook.ts` 는 `permission` 이벤트에서 Teams 답장으로 정해진 결정 JSON 만 stdout 에 쓰고, 그 외에는 아무것도 쓰지 않으며 항상 exit 0 으로 끝낸다.
+3. **Lazy connect**: `connect` / `select_chat` / `todo_*` 도구 호출 전에는 Azure · Graph 요청을 보내지 않는다. 인증 이벤트의 채널 push 도 `connectRequested` 이후에만. (`send` CLI 는 사용자가 직접 실행하는 별도 프로세스다.)
 4. **세션 식별은 claude PID**: 레지스트리 키는 서버의 `process.ppid`, hook 은 `CLAUDE_PID` → `process.ppid`. `session_id` 는 `/clear` 에서 바뀌므로 키로 쓰지 않는다. MCP 서버 command 를 셸·npx 래퍼로 감싸면 ppid 가 바뀌어 hook 이 서버를 못 찾는다 — `node ${CLAUDE_PLUGIN_ROOT}/dist/server.js` 직접 실행을 유지할 것.
 5. **발신자 게이트**: 세션 주입과 답장 명령(권한 승인 · 질문 응답)은 로그인 본인 또는 `access.allowedUserIds` 만 허용한다. PermissionRequest hook 결정은 이 게이트를 전제로 한다. 게이트는 트리거 판정보다 먼저 적용한다.
 6. **답장 verb 는 세션에 주입하지 않는다**: `REPLY_VERB_KEYWORDS` (`#allow-always` · `#allow-reset` · `#allow` · `#reject` · `#answer` · `#skip`) 매칭 시 파싱 성공/실패와 무관하게 `executeReply` 로만 간다. 모르는 코드 · 형식 오류 · 대기 요청 없음은 Teams 후속 메시지 없이 로그만 남긴다.
@@ -52,6 +53,7 @@ claudecode-ms-teams/
 22. **자동 승인은 세션 메모리 전용**: `autoAllowTools` 는 설정 · 레지스트리에 저장하지 않는다. `AskUserQuestion`, workspace 밖 경로(`~` 포함), `.claude/` · `.git/` · `.mcp.json`, workspace 를 모를 때는 자동 승인하지 않는다 (`autoAllowBlocker`). `disconnect` · 다른 채팅방 선택에서 비운다.
 23. **Stop hook 은 발신이 끝날 때까지 기다린다**: 서버는 `stop` 응답을 `holdAtMost(handleStop, STOP_WAIT_MS)` 로 잡아둔다. 즉시 202 로 되돌리지 말 것 — claude 는 Stop hook 이 끝나면 MCP 서버를 SIGINT 후 0.5초 안에 SIGKILL 해 `claude -p` 의 마지막 응답이 사라진다. `STOP_WAIT_MS` < `ipcTimeoutMs("stop")` < hooks.json Stop · StopFailure timeout (테스트로 강제).
 24. **`send` CLI 는 플러그인 로그를 쓰지 않는다**: `makeLogger` 는 시작할 때 로그 파일을 비우므로 실행 중인 세션의 로그가 지워진다. 진단은 stderr, 결과는 종료 코드 (0 · 1 발신 실패 · 2 사용법 · 3 설정·로그인). chatId 는 인자로만 받는다 (불변식 9 · 10).
+25. **To Do 는 선택 기능**: 노출(`tools/list` · instructions)은 서버 시작 시 `azure.scopes` 로 정한다 (`Tasks.ReadWrite` 7개 · `Tasks.Read` 조회 3개 · 없음 0개, 없으면 0.4.0 과 동일). `REQUIRED_SCOPES` 에 Tasks 를 넣지 말 것. `Tasks.*` 를 요청한 refresh 의 `invalid_grant` 는 바로 `revoked` 로 두지 않고 Tasks 를 뺀 scope 로 한 번 더 받는다 (Teams 보호, 그것도 실패하면 폐기). 기한은 날짜를 설정 시간대 그대로 보낸다 — UTC 로 바꿔 보내지 말 것 (To Do 가 보낸 시간대의 날짜를 그대로 쓴다). 응답의 `@odata.nextLink` 는 Graph 주소일 때만 따른다.
 
 ## 개발 워크플로
 
