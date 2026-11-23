@@ -413,7 +413,9 @@ export class Auth {
   }
 
   // 설정의 scope 전체로 refresh 한다 (다른 세션이 예전 scope 로 토큰을 덮어썼거나 그 사이 관리자 동의가 난 경우).
-  refreshWithTodoScopes(): Promise<string | null> {
+  // 진행 중인 refresh 는 To Do scope 없이 보낸 것일 수 있으므로 끝나기를 기다린 뒤 새로 요청한다.
+  async refreshWithTodoScopes(): Promise<string | null> {
+    if (this.refreshing) await this.refreshing
     this.todoConsentMissing = false
     return this.forceRefresh()
   }
@@ -534,8 +536,14 @@ export class Auth {
       const body = (await res.json()) as TokenSet & TokenError
       if (!res.ok) {
         // To Do scope 를 설정에 추가했지만 동의가 없으면 Teams 까지 멈추지 않도록 To Do scope 를 빼고 다시 받는다.
-        if (isConsentRequired(body) && todoAccess(scopes) !== "none") {
-          this.log.warn("token.todoConsentRequired", { suberror: body.suberror, errorCodes: body.error_codes })
+        // 동의 없음의 오류 형태(AADSTS65001 · 70000 등)를 모두 알 수 없으므로 Tasks 를 요청한 invalid_grant 는
+        // Tasks 없이 한 번 다시 받아 보고, 그것도 실패해야 폐기로 본다.
+        if (body.error === "invalid_grant" && todoAccess(scopes) !== "none") {
+          this.log.warn("token.todoScopeRejected", {
+            consentRequired: isConsentRequired(body),
+            suberror: body.suberror,
+            errorCodes: body.error_codes,
+          })
           this.todoConsentMissing = true
           return this.requestRefresh(t, withoutTodoScopes(scopes))
         }

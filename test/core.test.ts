@@ -485,6 +485,51 @@ describe("Auth / Graph (fetch stub)", () => {
     auth.dispose()
   })
 
+  test("Tasks 를 요청한 invalid_grant 는 오류 코드와 무관하게 Tasks 없이 한 번 더 받고, 그것도 실패해야 폐기한다", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() - 1000 })
+    cfg.azure.scopes = "Chat.Read offline_access Tasks.ReadWrite"
+    const scopes: string[] = []
+    let revokeAll = false
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const scope = new URLSearchParams(String(init?.body ?? "")).get("scope") ?? ""
+      scopes.push(scope)
+      if (revokeAll || /Tasks\./.test(scope)) return Response.json({ error: "invalid_grant", error_codes: [70000] }, { status: 400 })
+      return Response.json({ access_token: "teams-only", expires_in: 3600 })
+    }) as typeof fetch
+    let reauth = 0
+    const auth = new Auth(cfg, NOOP_LOG, { onReauthRequired: () => reauth++ })
+    expect(await auth.getAccessToken()).toBe("teams-only")
+    expect(scopes).toEqual(["Chat.Read offline_access Tasks.ReadWrite", "Chat.Read offline_access"])
+    expect(reauth).toBe(0)
+    revokeAll = true
+    expect(await auth.refreshWithTodoScopes()).toBeNull()
+    expect(scopes.slice(2)).toEqual(["Chat.Read offline_access Tasks.ReadWrite", "Chat.Read offline_access"])
+    expect(reauth).toBe(1)
+    expect(auth.hasRefreshToken()).toBe(false)
+    auth.dispose()
+  })
+
+  test("refreshWithTodoScopes 는 진행 중인 refresh 가 끝난 뒤 전체 scope 로 새로 요청한다", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() - 1000 })
+    cfg.azure.scopes = "Chat.Read Tasks.ReadWrite"
+    const scopes: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      scopes.push(new URLSearchParams(String(init?.body ?? "")).get("scope") ?? "")
+      if (scopes.length === 1) await gate
+      return Response.json({ access_token: `at-${scopes.length}`, expires_in: 3600, scope: "Chat.Read Tasks.ReadWrite" })
+    }) as typeof fetch
+    const auth = new Auth(cfg, NOOP_LOG)
+    const background = auth.getAccessToken()
+    const todo = auth.refreshWithTodoScopes()
+    release()
+    expect(await background).toBe("at-1")
+    expect(await todo).toBe("at-2")
+    expect(scopes).toHaveLength(2)
+    auth.dispose()
+  })
+
   test("To Do scope 없이도 consent_required 면 기존처럼 폐기로 처리한다", async () => {
     const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() - 1000 })
     stubFetch(() => Response.json(CONSENT_REQUIRED, { status: 400 }))
