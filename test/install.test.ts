@@ -162,6 +162,30 @@ describe("uninstall / doctor", () => {
     expect(plugin?.detail).toContain("0.1.0 ≠ 패키지 9.9.9")
   })
 
+  test("doctor 는 To Do 를 선택 기능으로 보고 scope · 토큰 권한을 정보로만 표시한다", () => {
+    const cfgPath = path.join(tmp, "xdg", DATA_DIR_NAME, CONFIG_FILE_NAME)
+    const tokensFile = path.join(tmp, "todo-tokens.json")
+    const { run } = fakeClaude({ markets: [], plugins: [] })
+    try {
+      fs.writeFileSync(cfgPath, JSON.stringify({ azure: { tenantId: "t", clientId: "c", scopes: "Chat.Read" } }))
+      const off = doctor({ packageDir: pkgDir, run }).find((c) => c.label === "Microsoft To Do")
+      expect(off).toEqual({ ok: true, label: "Microsoft To Do", detail: expect.stringContaining("Tasks.ReadWrite 추가 (선택)") })
+
+      fs.writeFileSync(tokensFile, JSON.stringify({ access_token: "a", refresh_token: "r", scope: "Chat.Read" }))
+      fs.writeFileSync(
+        cfgPath,
+        JSON.stringify({ azure: { tenantId: "t", clientId: "c", scopes: "Chat.Read Tasks.ReadWrite" }, tokens: { file: tokensFile }, todo: { timeZone: "Asia/Seoul" } }),
+      )
+      const on = doctor({ packageDir: pkgDir, run }).find((c) => c.label === "Microsoft To Do")
+      expect(on?.ok).toBe(true)
+      expect(on?.detail).toContain("사용 (Tasks.ReadWrite) · 시간대 Asia/Seoul")
+      expect(on?.detail).toContain("Tasks 권한 없음")
+    } finally {
+      fs.rmSync(cfgPath, { force: true })
+      fs.rmSync(tokensFile, { force: true })
+    }
+  })
+
   test("uninstall --purge 는 데이터 디렉토리와 외부 경로의 토큰 파일만 지운다", () => {
     const outside = path.join(tmp, "elsewhere")
     fs.mkdirSync(outside)

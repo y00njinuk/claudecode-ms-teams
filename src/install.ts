@@ -5,15 +5,20 @@ import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import {
+  Auth,
   azureConfigured,
   CHANNEL_LAUNCH_COMMAND,
   dataDir,
   ensureConfigFile,
   loadConfig,
   MARKETPLACE_NAME,
+  NOOP_LOG,
   PLUGIN_ID,
+  TODO_SCOPE_RW,
+  todoAccess,
 } from "./core.js"
 import { readRegistry, runDir, isAlive } from "./ipc.js"
+import { describeTodoAccess, describeTodoToken, todoTimeZone } from "./todo.js"
 
 export type RunResult = { status: number; stdout: string; stderr: string }
 export type Runner = (args: string[]) => RunResult
@@ -158,6 +163,17 @@ export function doctor({ packageDir, run = defaultRunner }: { packageDir: string
     ok: fs.existsSync(cfg.tokens.file),
     label: "로그인 토큰",
     detail: fs.existsSync(cfg.tokens.file) ? cfg.tokens.file : "없음 — /microsoft-teams:connect 로 로그인",
+  })
+  // To Do 는 선택 기능이라 꺼져 있거나 토큰 권한이 모자라도 실패로 보지 않는다.
+  const todo = todoAccess(cfg.azure.scopes)
+  checks.push({
+    ok: true,
+    label: "Microsoft To Do",
+    detail:
+      todo === "none"
+        ? `${describeTodoAccess(todo)} — 쓰려면 azure.scopes 에 ${TODO_SCOPE_RW} 추가 (선택)`
+        : `${describeTodoAccess(todo)} · 시간대 ${todoTimeZone(cfg)}` +
+          (fs.existsSync(cfg.tokens.file) ? ` · ${describeTodoToken(new Auth(cfg, NOOP_LOG).tokenScope())}` : ""),
   })
 
   const version = run(["--version"])
