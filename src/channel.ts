@@ -356,8 +356,10 @@ export class MicrosoftTeamsChannel {
     this.d.auth.bootstrap()
     if (!this.d.auth.hasRefreshToken()) return this.beginLogin()
     if (opts.relogin) {
-      // 로그인 완료 후 계정이 바뀌었는지 비교할 기준을 먼저 잡아 둔다 (onLoginComplete).
-      await this.ensureMe()
+      // 로그인 완료 후 계정이 바뀌었는지 비교할 기준을 먼저 잡아 둔다 (onLoginComplete). 기준이 없으면 다른 계정 로그인을 알아챌 수 없다.
+      if (!(await this.ensureMe())) {
+        return { isError: true, text: "현재 로그인한 계정을 확인하지 못해 다시 로그인을 시작하지 않았습니다. 네트워크를 확인한 뒤 다시 시도하세요." }
+      }
       return this.beginLogin(true)
     }
     const token = await this.d.auth.getAccessToken()

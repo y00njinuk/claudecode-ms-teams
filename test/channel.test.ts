@@ -176,6 +176,14 @@ describe("connect / select_chat", () => {
     expect(s.sent.at(-1)?.html).not.toContain("ABCD-1234")
   })
 
+  test("relogin 전에 현재 계정을 확인하지 못하면 device flow 를 시작하지 않는다", async () => {
+    const s = setup()
+    s.setMe(null as never)
+    const r = await s.channel.connect({ relogin: true })
+    expect(r.isError).toBe(true)
+    expect(s.deviceFlowStarted).toBe(0)
+  })
+
   test("relogin 으로 다른 계정이 로그인하면 연동을 해제한다", async () => {
     const s = await connected()
     await s.channel.connect({ relogin: true })
