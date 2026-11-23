@@ -720,6 +720,16 @@ export type ChatSummary = { id: string; topic: string; chatType: string; lastAct
 
 export type Me = { id: string; displayName: string }
 
+export const SSL_HINT = "사내망 프록시 인증서 문제로 보임. NODE_EXTRA_CA_CERTS=<사내 CA 번들 경로> 설정 후 Claude Code 재시작"
+
+export type GraphMethod = "GET" | "POST" | "PATCH" | "DELETE"
+
+// ok=false 의 error: auth(토큰 없음 · 401 재시도 실패) · network · ssl · badBody(본문 파싱 실패) · http(그 외 상태 코드).
+// status 는 HTTP 응답이 없으면 0. body 는 파싱한 응답 본문 (Graph 오류면 `{ error: { code, message } }`).
+export type GraphResult =
+  | { ok: true; status: number; body: any }
+  | { ok: false; status: number; body: any; error: "auth" | "network" | "ssl" | "badBody" | "http" }
+
 export class Graph {
   constructor(
     private auth: Auth,
@@ -730,9 +740,10 @@ export class Graph {
     return `https://graph.microsoft.com/v1.0/chats/${encodeURIComponent(chatId)}`
   }
 
-  private async call(method: "GET" | "POST", url: string, body?: object, retried = false): Promise<any | null> {
+  // 실패 원인이 필요한 호출용. 401 은 forceRefresh 후 1회, 429 는 Retry-After 대기 후 1회 재시도한다.
+  async request(method: GraphMethod, url: string, body?: object, retried = false): Promise<GraphResult> {
     const token = await this.auth.getAccessToken()
-    if (!token) return null
+    if (!token) return { ok: false, status: 0, body: null, error: "auth" }
     let res: Response
     try {
       res = await fetch(url, {
@@ -744,36 +755,46 @@ export class Graph {
       const msg = String((e as { cause?: unknown })?.cause ?? e)
       this.log.warn("graph.network", { url, error: msg })
       if (/certificat|UNABLE_TO_VERIFY|self.signed/i.test(msg)) {
-        this.log.error("graph.ssl.hint", {
-          hint: "사내망 프록시 인증서 문제로 보임. NODE_EXTRA_CA_CERTS=<사내 CA 번들 경로> 설정 후 Claude Code 재시작",
-        })
+        this.log.error("graph.ssl.hint", { hint: SSL_HINT })
+        return { ok: false, status: 0, body: null, error: "ssl" }
       }
-      return null
+      return { ok: false, status: 0, body: null, error: "network" }
     }
     if (res.status === 401 && !retried) {
       const t2 = await this.auth.forceRefresh()
-      if (!t2) return null
-      return this.call(method, url, body, true)
+      if (!t2) return { ok: false, status: 401, body: null, error: "auth" }
+      return this.request(method, url, body, true)
     }
     if (res.status === 429) {
       const ra = Number(res.headers.get("Retry-After") ?? "10")
       this.log.warn("graph.throttled", { retryAfterSec: ra })
-      if (retried) return null
-      await sleep(ra * 1000)
-      return this.call(method, url, body, true)
+      if (!retried) {
+        await sleep(ra * 1000)
+        return this.request(method, url, body, true)
+      }
     }
     if (!res.ok) {
       this.log.error("graph.error", { url, status: res.status })
-      return null
+      let errorBody: unknown = null
+      try {
+        errorBody = await res.json()
+      } catch {}
+      return { ok: false, status: res.status, body: errorBody, error: "http" }
     }
-    if (res.status === 204) return {}
-    // 프록시·캡티브 포털의 HTML 응답이나 본문 중간 끊김이 서버 프로세스를 죽이지 않도록 null 로 흡수한다.
+    if (res.status === 204) return { ok: true, status: 204, body: {} }
+    // 프록시·캡티브 포털의 HTML 응답이나 본문 중간 끊김이 서버 프로세스를 죽이지 않도록 실패로 흡수한다.
     try {
-      return await res.json()
+      return { ok: true, status: res.status, body: await res.json() }
     } catch (e) {
       this.log.warn("graph.badBody", { url, error: String(e) })
-      return null
+      return { ok: false, status: res.status, body: null, error: "badBody" }
     }
+  }
+
+  // 실패는 모두 null (원인은 로그에만 남는다).
+  private async call(method: "GET" | "POST", url: string, body?: object): Promise<any | null> {
+    const r = await this.request(method, url, body)
+    return r.ok ? r.body : null
   }
 
   async me(): Promise<Me | null> {

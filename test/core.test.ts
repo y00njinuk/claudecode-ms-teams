@@ -336,6 +336,73 @@ describe("Auth / Graph (fetch stub)", () => {
     expect(await graph.messagesSince("19:x@thread.v2", 0)).toBeNull()
   })
 
+  test("Graph.request 는 실패 상태 코드와 Graph 오류 본문을 돌려주고, call 경로는 여전히 null 이다", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() + 3600_000 })
+    const status = { code: 403 }
+    stubFetch(() => Response.json({ error: { code: "Forbidden", message: "Access denied" } }, { status: status.code }))
+    const graph = new Graph(new Auth(cfg, NOOP_LOG), NOOP_LOG)
+    for (const code of [400, 403, 404]) {
+      status.code = code
+      expect(await graph.request("GET", "https://graph.microsoft.com/v1.0/me/todo/lists")).toEqual({
+        ok: false,
+        status: code,
+        body: { error: { code: "Forbidden", message: "Access denied" } },
+        error: "http",
+      })
+    }
+    expect(await graph.me()).toBeNull()
+  })
+
+  test("Graph.request 는 401 이면 토큰을 갱신해 한 번 재시도하고, 204 는 빈 본문으로 성공한다", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() + 3600_000 })
+    let graphCalls = 0
+    const urls = stubFetch((url) => {
+      if (url.includes("/oauth2/")) return Response.json({ access_token: "b", expires_in: 3600 })
+      graphCalls++
+      return graphCalls === 1 ? new Response("", { status: 401 }) : new Response(null, { status: 204 })
+    })
+    const auth = new Auth(cfg, NOOP_LOG)
+    const graph = new Graph(auth, NOOP_LOG)
+    expect(await graph.request("DELETE", "https://graph.microsoft.com/v1.0/x")).toEqual({ ok: true, status: 204, body: {} })
+    expect(urls.filter((u) => u.includes("/oauth2/"))).toHaveLength(1)
+    expect(graphCalls).toBe(2)
+    auth.dispose()
+  })
+
+  test("Graph.request 는 401 재시도에도 토큰을 얻지 못하면 auth 오류다", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() + 3600_000 })
+    stubFetch((url) => (url.includes("/oauth2/") ? Response.json({ error: "temporarily_unavailable" }, { status: 503 }) : new Response("", { status: 401 })))
+    const auth = new Auth(cfg, NOOP_LOG)
+    const r = await new Graph(auth, NOOP_LOG).request("GET", "https://graph.microsoft.com/v1.0/x")
+    expect(r).toMatchObject({ ok: false, status: 401, error: "auth" })
+    auth.dispose()
+  })
+
+  test("Graph.request 는 429 를 Retry-After 만큼 기다려 한 번만 재시도한다", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() + 3600_000 })
+    let calls = 0
+    stubFetch(() => {
+      calls++
+      return new Response("", { status: 429, headers: { "Retry-After": "0" } })
+    })
+    const graph = new Graph(new Auth(cfg, NOOP_LOG), NOOP_LOG)
+    expect(await graph.request("GET", "https://graph.microsoft.com/v1.0/x")).toMatchObject({ ok: false, status: 429, error: "http" })
+    expect(calls).toBe(2)
+  })
+
+  test("Graph.request 는 네트워크 오류와 인증서 오류를 구분한다", async () => {
+    const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() + 3600_000 })
+    const graph = new Graph(new Auth(cfg, NOOP_LOG), NOOP_LOG)
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed", { cause: new Error("ECONNRESET") })
+    }) as unknown as typeof fetch
+    expect(await graph.request("GET", "https://graph.microsoft.com/v1.0/x")).toMatchObject({ ok: false, status: 0, error: "network" })
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed", { cause: new Error("UNABLE_TO_VERIFY_LEAF_SIGNATURE") })
+    }) as unknown as typeof fetch
+    expect(await graph.request("GET", "https://graph.microsoft.com/v1.0/x")).toMatchObject({ ok: false, status: 0, error: "ssl" })
+  })
+
   test("invalid_grant 이면 device flow 없이 재로그인 이벤트를 한 번 내고 이후 토큰 요청을 멈춘다", async () => {
     const cfg = cfgWithTokens({ access_token: "a", refresh_token: "r", expires_at: Date.now() - 1000 })
     const urls = stubFetch(() => Response.json({ error: "invalid_grant" }, { status: 400 }))
